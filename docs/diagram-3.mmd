@@ -1,0 +1,15 @@
+flowchart TB
+  input[Planning artifacts and configuration]
+  subgraph analysis["Derive System Specifications"]
+    cfg["[ANALYSIS] config.py"] --> loader["[ANALYSIS] dataset_loader.py"] --> model["[ANALYSIS] model.py"] --> utils["[ANALYSIS] utils.py"]
+    trainer["[ANALYSIS] trainer.py"] --> evaluation["[ANALYSIS] evaluation.py"] --> main["[ANALYSIS] main.py"]
+    utils --> trainer
+  end
+  output[Analyzed module specifications]
+
+  input --> cfg
+  main --> output
+  classDef transition fill:#fff2cc,stroke:#b8860b,stroke-width:3px,color:#222,font-weight:bold
+  class input,output transition
+  analysis_usage["LLM: o3-mini<br/>Input: 7,521 | Cached: 194,304<br/>Output: 30,295 | Cost: $0.24843830"]
+  analysis -. usage .-> analysis_usage

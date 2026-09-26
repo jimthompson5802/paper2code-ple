@@ -1,0 +1,11 @@
+flowchart TB
+  implementation[paper2code-ple/ple-paper_repo]
+  subgraph runtime["Run the generated implementation"]
+    run[Run: python main.py] --> data[Load configured dataset] --> preprocess[Preprocess and split data]
+    build[Build embeddings and model] --> train[Train configured runs] --> evaluate[Evaluate validation and test sets] --> output[Report metrics and save best_model.pt]
+    preprocess --> build
+  end
+
+  implementation --> run
+  classDef transition fill:#fff2cc,stroke:#b8860b,stroke-width:3px,color:#222,font-weight:bold
+  class implementation transition

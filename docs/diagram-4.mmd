@@ -1,0 +1,16 @@
+flowchart TB
+  input[Analyzed module specifications]
+  subgraph coding["Generate Source Code"]
+    cfg["[CODING] config.py"] --> loader["[CODING] dataset_loader.py"] --> model["[CODING] model.py"] --> utils["[CODING] utils.py"]
+    direction LR
+    trainer["[CODING] trainer.py"] --> evaluation["[CODING] evaluation.py"] --> main["[CODING] main.py"] --> generated[Generated source: Paper2Code/outputs/ple-paper_repo]
+    utils --> trainer
+  end
+  implementation[paper2code-ple/ple-paper_repo]
+
+  input --> cfg
+  generated --> implementation
+  classDef transition fill:#fff2cc,stroke:#b8860b,stroke-width:3px,color:#222,font-weight:bold
+  class input,implementation transition
+  coding_usage["LLM: o3-mini<br/>Input: 37,235 | Cached: 221,312<br/>Output: 49,610 | Cost: $0.38096410"]
+  coding -. usage .-> coding_usage

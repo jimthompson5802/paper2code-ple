@@ -1,0 +1,16 @@
+flowchart TB
+  json[Structured paper JSON]
+  subgraph planning["Planning"]
+    direction LR
+    clean[Script: codes/0_pdf_process.py<br/>Clean JSON] --> plan["[Planning] Overall plan"] --> architecture["[Planning] Architecture design"]
+    logic["[Planning] Logic design"] --> config["[Planning] Configuration file generation"] --> extract[Script: codes/1.1_extract_config.py<br/>Extract config and artifacts]
+  end
+  output[Planning artifacts and configuration]
+
+  json --> clean
+  architecture --> logic
+  extract --> output
+  classDef transition fill:#fff2cc,stroke:#b8860b,stroke-width:3px,color:#222,font-weight:bold
+  class json,output transition
+  planning_usage["LLM: o3-mini<br/>Input: 6,906 | Cached: 101,504<br/>Output: 13,283 | Cost: $0.12186900"]
+  planning -. usage .-> planning_usage
