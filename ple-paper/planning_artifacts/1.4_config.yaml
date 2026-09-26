@@ -1,29 +1,50 @@
 ## config.yaml
 training:
-  optimizer: "AdamW"
-  learning_rate: 1e-3  # Default value; no learning rate schedule as per paper.
-  batch_size: 128      # Predefined per dataset (see Appendix C)
-  early_stopping_patience: 16
-  max_epochs: 100      # Maximum epochs set as a safeguard; training stops based on early stopping.
-  num_runs: 15         # Number of experiments with different random seeds.
-model:
-  backbone:
-    type: "MLP"        # Options: MLP, ResNet, Transformer. Default MLP has 4 layers of size 256.
-    mlp_layers: 4
-    mlp_hidden_size: 256
-  embedding:
-    type: "PLE_q"      # Options: LR, PLE_q (quantile-based), PLE_t (target-aware), Periodic.
-data:
-  preprocessing: "quantile"   # Use quantile transformation for all datasets except Otto Group.
-  quantile_bins: 256          # Number of bins for quantile-based PLE (tuned between 2 and 256)
-  target_aware_params:
-    max_leaves: 256           # Maximum leaves for target-aware binning (tuned between 2 and 256)
-    min_items_per_leaf: 1     # Minimum items per leaf (tuned between 1 and 128)
-    min_info_gain: 1e-9        # Minimum information gain required for a split (tuned in [1e-9, 0.01])
-embedding:
+  optimizer: "AdamW"  # Using AdamW optimizer as specified in the paper.
+  learning_rate_range: [5e-05, 0.005]  # MLP hyperparameter search range from LogUniform[5e-5, 0.005].
+  batch_size: 128  # Default batch size; actual values may be dataset-specific.
+  max_epochs: 100  # Number of epochs/iterations as used in the experiments.
+  early_stopping_patience: 16  # Patience value for early stopping (patience + 1 epochs with no improvement).
+
+seed: 42  # Random seed for reproducibility.
+
+data_preprocessing:
+  numerical:
+    transformer: "QuantileTransformer"  # Quantile transformation applied as per paper (except for some exceptions).
+    apply_preprocessing: true
+  categorical:
+    encoding: "one-hot"  # One-hot encoding used for categorical features.
+
+embeddings:
+  ple:
+    method: "quantile"  # Options: 'quantile' (unsupervised) or 'target_aware' (supervised) binning.
+    quantile_bins_range: [2, 256]  # UniformInt[2,256] for quantile-based PLE.
+    target_aware:
+      max_leaves_range: [2, 256]  # For tree-based (C4.5 discretization) binning.
+      min_items_per_leaf_range: [1, 128]
+      min_info_gain_range: [1e-09, 0.01]  # LogUniform between 1e-9 and 0.01.
   periodic:
-    k_range: [1, 128]         # Tuning range for periodic embedding parameter k (UniformInt between 1 and 128)
-    sigma: 0.1                # Initial sigma for periodic embedding; important hyperparameter to tune
-experiment:
-  random_seed: 42
-  use_optuna: true          # Use Optuna for hyperparameter tuning as described in the paper.
+    k_range: [1, 128]  # UniformInt for the number of groups/features in the periodic module.
+    sigma: 0.1  # Default sigma value; σ is important and tuned using validation sets.
+
+backbone:
+  mlp:
+    num_layers: 4  # As used in the synthetic experiment.
+    layer_size: 256  # Each layer has 256 units.
+  resnet:
+    num_layers: 4  # Placeholder; follows similar structure as MLP.
+    layer_size: 256
+  transformer:
+    num_layers: 2  # Using a reduced number of layers for FT-Transformer variant.
+    embedding_size_range: [96, 512]  # As indicated in the Transformer hyperparameter search space.
+
+hyperparameter_tuning:
+  use_optuna: true  # Employ Optuna for hyperparameter tuning.
+  trials: 50  # Number of optimization trials.
+
+evaluation:
+  num_seeds: 15  # Number of independent runs for each configuration.
+  ensemble_groups: 3  # Split 15 runs into 3 ensembles for averaging.
+  metrics:
+    classification: "accuracy"
+    regression: "RMSE"

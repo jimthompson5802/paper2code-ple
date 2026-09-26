@@ -1,0 +1,70 @@
+Below is the logic analysis for the configuration module (config.py). This file serves as the single source‐of‐truth for all experiment settings and hyperparameter search spaces so that every component of the pipeline (data loading, model construction, training, and evaluation) can import consistent values. The analysis below is written in the style and with comments that would be included at the top and throughout config.py.
+
+------------------------------------------------------------
+# config.py – Logic Analysis and High-Level Implementation Plan
+
+"""
+Purpose:
+--------
+This module is responsible for loading, validating, and providing access to all configuration parameters that are used throughout the experimental pipeline. It ensures that every module (DatasetLoader, Model, Trainer, Evaluator, etc.) uses the same settings for reproducibility and consistency.
+
+Key Responsibilities:
+---------------------
+1. Load configuration settings from an external YAML file (or JSON file if needed). The default file is config.yaml.
+2. Validate that all required sections are present:
+   • training
+   • seed
+   • data_preprocessing
+   • embeddings
+   • backbone
+   • hyperparameter_tuning
+   • evaluation
+
+3. Provide a uniform API (e.g., via a function like load_config()) that returns a Python dictionary with the configuration values.
+4. Centralize definitions of hyperparameter search spaces (e.g., learning_rate_range in training, quantile_bins_range for PLE in embeddings, k_range and sigma for periodic embeddings) so that other modules (like trainer.py using Optuna) can directly refer to them.
+5. Set defaults as needed (for example, if a key is missing, provide an informative error message).
+6. Ensure reproducibility by making the random seed (seed: 42 in this case) available for any module that needs to set PyTorch, NumPy, or Python’s built‐in random seed.
+7. Document within this file the mapping between the configuration keys and the experimental components. For instance:
+   - "training" keys (optimizer type, learning rate range, batch size, max_epochs, early_stopping_patience) will be referenced by the Trainer class to configure the optimizer (AdamW), the early stopping logic, and the learning rate search space.
+   - "data_preprocessing" keys determine which scikit-learn transformer to use (in our case, QuantileTransformer for numerical data) as well as the encoding method for categorical features (one-hot encoding).
+   - "embeddings" section defines sub-configurations for PLE and periodic modules:
+          • For PLE: the method (quantile or target_aware), the range for the number of bins (UniformInt range [2,256]), and (if using supervised binning) additional settings like max_leaves_range, min_items_per_leaf_range, and min_info_gain_range.
+          • For the periodic module: the k_range (UniformInt [1,128]) and the default sigma value (0.1), which will later be used to initialize trainable coefficients drawn from N(0, sigma).
+   - "backbone" holds model architecture settings for MLP, ResNet, and Transformer such as number of layers, layer sizes, and (for the Transformer) the embedding size range.
+   - "hyperparameter_tuning" indicates whether to use Optuna (true/false) and sets the number of trials (e.g., 50) for searching in the defined search spaces.
+   - "evaluation" specifies the number of seeds (15) for independent runs, the number of ensemble groups (3), and the metrics (accuracy for classification, RMSE for regression) that are later used by the Evaluator module.
+
+Implementation Details:
+-----------------------
+• Use a YAML parser (for example, the PyYAML library) to load the contents of config.yaml.
+• Check for the existence of the file and, if missing, raise a FileNotFoundError with an informative message.
+• After loading the YAML file, verify that all the expected keys are present – iterate over a predefined list of required keys and alert the user if any are missing.
+• The load_config() function should return a Python dictionary. Other modules (dataset_loader.py, model.py, trainer.py, evaluation.py) will import or call this function to obtain their configuration values.
+• The configuration parameters for continuous hyperparameter tuning (such as learning_rate_range, quantile_bins_range, and others) will be later used in the hyperparameter search via Optuna. The ranges defined in the configuration are specified exactly as described in the provided config.yaml.
+• A comment (or TODO note) should be added to clarify that while most parameters come straight from config.yaml, the exact mathematical details of the periodic activation module (e.g., the choice of sin/cos, the dimensions of the trainable coefficient cᵢ, etc.) were subject to further clarification. This note ensures that future developers or researchers can revisit these details if further experimental evidence or a paper clarification is available.
+• For reproducibility, the “seed” from the configuration is also made available, and it will be used immediately at startup by components needing to set random seeds.
+• The file organization and design deliberately keep this module independent so that any changes to experiment settings can be made in a single place, reducing the risk of inconsistencies across the codebase.
+
+Example Outline within config.py:
+----------------------------------
+# 1. Import necessary libraries (e.g., yaml, os)
+# 2. Define a function load_config(config_file='config.yaml')
+#     a. Check for file existence.
+#     b. Use yaml.safe_load() to load the file.
+#     c. Validate that all required sections are present.
+# 3. (Optional) Provide helper functions to get specific subsections (e.g., get_training_config()).
+# 4. Possibly set global constants like CONFIG = load_config() so that other modules can import CONFIG directly.
+# 5. Document inside the file the mapping between config keys and experiment components for clarity.
+# 6. Include inline comments that reference the values from the paper – for example, note that batch_size=128, max_epochs=100, early_stopping_patience=16 are taken straight from the experimental setup description.
+
+Final Notes:
+------------
+• This module must not “invent” any configuration values; it solely relies on the values provided in config.yaml.
+• All modules in the system – dataset_loader.py, model.py, trainer.py, evaluation.py, and main.py – must import these configuration values to ensure consistency.
+• The configuration structure reflects the experimental pipeline described in the paper, including details for the embedding modules (PLE and periodic), backbone architectures, and training protocols.
+• In case further clarity is needed regarding the periodic activation’s parameters (such as the exact function to use), a comment or a TODO note should be included right next to the relevant configuration entries.
+
+By following this logic analysis, the config.py module will provide a clear, centralized, and reproducible configuration interface that aligns completely with the methodology, experiment design, and reproducibility goals set out in the paper "On Embeddings for Numerical Features in Tabular Deep Learning."
+------------------------------------------------------------
+
+This analysis ensures that you have a blueprint for writing config.py that meets the requirements—centralizing all hyperparameters, settings, and design choices into one file that is used consistently by all components of the codebase.

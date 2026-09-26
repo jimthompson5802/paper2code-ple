@@ -1,534 +1,382 @@
+## Code: model.py
 ```python
 """
 model.py
 
-This module defines all model‐related components, including:
-    - The abstract base class EmbeddingModule and its concrete implementations:
-         • PiecewiseLinearEmbedding (PLE)
-         • PeriodicEmbedding
-         • LinearEmbedding
-    - Backbone models: MLP, ResNet (with residual blocks), and TransformerModel.
-    - The Model wrapper that combines per-feature embedding modules with the chosen backbone.
+This module defines the overall model architecture used for embedding numerical features
+into high-dimensional representations and processing them through deep backbones.
 
-All hyperparameters and configuration settings are read from the provided configuration dictionary,
-which should be parsed from the config.yaml file.
+It includes:
+  - EmbeddingModule: Abstract base class for numerical feature embedding modules.
+  - PLEEmbedding: Implements Piecewise Linear Encoding (PLE) for numerical features.
+  - PeriodicEmbedding: Implements periodic activation-based embedding.
+  - ResidualBlock: A simple residual block for ResNet-like backbones.
+  - BackboneModel: Integrates per-feature embeddings with a selected deep network backbone
+                   (MLP, ResNet, or Transformer).
+
+Configurations for embedding parameters and backbone structure are read from config.yaml
+(via functions in config.py).
 """
 
-import math
-from abc import ABC, abstractmethod
-from typing import Any, List, Optional
-
-import numpy as np
 import torch
 import torch.nn as nn
-from torch import Tensor
+import torch.nn.functional as F
+from typing import List, Optional
+
+# Import backbone configuration getter from config.py.
+from config import get_backbone_config
 
 
-# =============================================================================
-# Embedding Modules
-# =============================================================================
-
-class EmbeddingModule(nn.Module, ABC):
+class EmbeddingModule(nn.Module):
     """
-    Abstract base class for embedding modules.
-    Defines the interface for all embedding modules.
+    Abstract base class for numerical feature embedding modules.
+    
+    Subclasses must implement the forward method.
     """
+    def __init__(self) -> None:
+        super().__init__()
 
-    @abstractmethod
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass for the embedding module.
-
+        
         Args:
-            x (Tensor): Input tensor of shape [batch_size, 1] representing a scalar feature.
-
+            x (torch.Tensor): Tensor of shape (batch_size, 1) representing scalar input.
+        
         Returns:
-            Tensor: Embedded representation.
+            torch.Tensor: Embedded representation of shape (batch_size, embedding_dim).
         """
-        pass
+        raise NotImplementedError("Subclasses of EmbeddingModule must implement forward().")
 
 
-class PiecewiseLinearEmbedding(EmbeddingModule):
+class PLEEmbedding(EmbeddingModule):
     """
-    Implements the Piecewise Linear Encoding (PLE) module for numerical features.
-    Computes a T-dimensional PLE vector using precomputed bin boundaries and applies
-    a linear transformation to produce the final embedding.
-
-    The bin boundaries can be computed using either a quantile-based strategy ("quantile")
-    or a target-aware strategy ("target_aware"). The interpolation is defined such that for each bin t:
-        - If t > 1 and x < b_{t-1}, then e_t = 0.
-        - Else if t < T and x >= b_t, then e_t = 1.
-        - Otherwise, e_t = (x - b_{t-1}) / (b_t - b_{t-1]).
+    Piecewise Linear Encoding (PLE) embedding module.
+    
+    Implements a binning-based piecewise linear transformation. Given a set of predetermined
+    bin boundaries, the module computes a T-dimensional vector for each scalar input as follows:
+    
+      For each bin i (with lower boundary b[i] and upper boundary b[i+1]):
+        - if x >= b[i+1]: output 1,
+        - elif x < b[i]: output 0,
+        - else: output (x - b[i]) / (b[i+1] - b[i]).
+    
+    The resulting vector is then fused via a linear layer.
+    
+    Attributes:
+        bins (int): Number of bins (T).
+        method (str): Binning strategy used (e.g., "quantile" or "target_aware").
+        embedding_dim (int): Desired final output dimension.
+        fusion (nn.Linear): Linear layer that maps the T-dimensional vector to embedding_dim.
+        boundaries (Optional[torch.Tensor]): 1D tensor of bin boundaries with shape (bins+1,).
     """
-
-    def __init__(self, params: dict, embedding_dim: int, strategy: str = "quantile") -> None:
+    def __init__(
+        self,
+        bins: int = 10,
+        method: str = "quantile",
+        embedding_dim: int = 32,
+        boundaries: Optional[torch.Tensor] = None
+    ) -> None:
         """
-        Initializes the PiecewiseLinearEmbedding module.
-
+        Initialize the PLEEmbedding.
+        
         Args:
-            params (dict): Dictionary of parameters. For quantile-based PLE,
-                expects 'quantile_bins'; for target-aware, expects 'target_aware_params'
-                with key 'max_leaves'.
-            embedding_dim (int): Output embedding dimension.
-            strategy (str, optional): Binning strategy: "quantile" or "target_aware".
-                Defaults to "quantile".
+            bins (int): Number of bins to use. Default is 10.
+            method (str): Binning method ("quantile" or "target_aware"). Default is "quantile".
+            embedding_dim (int): Output embedding dimension. Default is 32.
+            boundaries (Optional[torch.Tensor]): Optional tensor of bin boundaries (shape: (bins+1,)).
+                If provided, it is registered as a non-trainable buffer.
         """
         super().__init__()
+        self.bins: int = bins
+        self.method: str = method
         self.embedding_dim: int = embedding_dim
-        self.strategy: str = strategy.lower()
-        if self.strategy == "quantile":
-            self.num_bins: int = params.get("quantile_bins", 256)
+        self.fusion: nn.Linear = nn.Linear(self.bins, self.embedding_dim, bias=True)
+        if boundaries is not None:
+            if boundaries.ndim != 1 or boundaries.shape[0] != self.bins + 1:
+                raise ValueError("Boundaries tensor must have shape (bins+1,)")
+            self.register_buffer("boundaries", boundaries)
         else:
-            target_params = params.get("target_aware_params", {})
-            self.num_bins = target_params.get("max_leaves", 256)
-        # Bin boundaries will be computed externally and stored in self.bins.
-        self.bins: Optional[List[float]] = None
-        # The linear layer projects the PLE vector (of dimension num_bins) to embedding_dim.
-        self.linear: nn.Linear = nn.Linear(self.num_bins, self.embedding_dim)
+            self.boundaries = None
 
-    def compute_bins(self, data: Tensor) -> List[float]:
+    def set_boundaries(self, boundaries: torch.Tensor) -> None:
         """
-        Computes bin boundaries for the given training data of one feature.
-
+        Set the bin boundaries for the PLE embedding.
+        
         Args:
-            data (Tensor): 1D tensor or a column vector of training data.
-
-        Returns:
-            List[float]: Ordered list of bin boundaries [b0, b1, ..., b_T],
-            where T = self.num_bins.
+            boundaries (torch.Tensor): Tensor of shape (bins+1,) containing bin boundaries.
         """
-        # Convert Tensor to numpy array (flattened) for percentile computation.
-        x_np: np.ndarray = data.detach().cpu().numpy().flatten()
-        # Compute equally spaced quantiles from 0 to 100.
-        quantiles: np.ndarray = np.linspace(0, 100, self.num_bins + 1)
-        bins: List[float] = np.percentile(x_np, quantiles).tolist()
-        # Remove trivial bins (duplicates) to ensure strict increasing order.
-        filtered_bins: List[float] = [bins[0]]
-        for b in bins[1:]:
-            if b > filtered_bins[-1]:
-                filtered_bins.append(b)
-        self.bins = filtered_bins
-        return filtered_bins
+        if boundaries.ndim != 1 or boundaries.shape[0] != self.bins + 1:
+            raise ValueError("Boundaries tensor must have shape (bins+1,)")
+        self.register_buffer("boundaries", boundaries)
+        self.boundaries = boundaries
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of the PLE module.
-
+        Forward pass for the PLE embedding.
+        
+        Computes a T-dimensional vector based on the bin boundaries and fuses it using a linear layer.
+        
         Args:
-            x (Tensor): Input tensor of shape [batch_size, 1] containing scalar values.
-
+            x (torch.Tensor): Tensor of shape (batch_size, 1) representing raw scalar features.
+        
         Returns:
-            Tensor: Final embedding of shape [batch_size, embedding_dim].
+            torch.Tensor: Tensor of shape (batch_size, embedding_dim) with the final embedding.
         """
-        if self.bins is None:
-            raise ValueError("Bin boundaries have not been computed. Call compute_bins() first.")
-        # Convert bin boundaries to a torch tensor.
-        bins_tensor: Tensor = torch.tensor(self.bins, dtype=x.dtype, device=x.device)
-        # Number of intervals T: len(bins) - 1.
-        T_bins: int = bins_tensor.numel() - 1
-        batch_size: int = x.size(0)
-        # Lower and upper boundaries for each bin.
-        lower: Tensor = bins_tensor[:-1]  # Shape: [T_bins]
-        upper: Tensor = bins_tensor[1:]   # Shape: [T_bins]
-
-        # Initialize list to collect the computed e_t values for each bin.
-        ple_list: List[Tensor] = []
-        # Process each bin.
-        for i in range(T_bins):
-            li: Tensor = lower[i]
-            ui: Tensor = upper[i]
-            # For bins with index > 0, if x < li, then set output to 0.
-            if i > 0:
-                cond_lower: Tensor = (x < li).float()  # Shape: [batch_size, 1]
-            else:
-                cond_lower = torch.zeros_like(x)
-            # For bins with index < T_bins - 1, if x >= ui, then set output to 1.
-            if i < T_bins - 1:
-                cond_upper: Tensor = (x >= ui).float()
-            else:
-                cond_upper = torch.zeros_like(x)
-            # Compute the ratio: (x - li) / (ui - li)
-            ratio: Tensor = (x - li) / (ui - li)
-            # Combine conditions:
-            # If x < li, then value = 0; if x >= ui, then value = 1; otherwise, value = ratio.
-            e_t: Tensor = cond_lower * 0.0 + (1.0 - cond_lower) * (cond_upper * 1.0 + (1.0 - cond_upper) * ratio)
-            ple_list.append(e_t)
-        # Concatenate all e_t values along the feature dimension to form the PLE vector.
-        ple_vector: Tensor = torch.cat(ple_list, dim=1)  # Shape: [batch_size, T_bins]
-        # Project the PLE vector through a linear layer.
-        embedding: Tensor = self.linear(ple_vector)
+        if self.boundaries is None:
+            raise ValueError("Boundaries are not set for PLEEmbedding.")
+        # Extract lower and upper boundaries from the boundaries tensor.
+        # boundaries shape: (bins+1,) => lower: (bins,), upper: (bins,)
+        lower: torch.Tensor = self.boundaries[:-1]
+        upper: torch.Tensor = self.boundaries[1:]
+        # Reshape for broadcasting: (1, bins)
+        lower = lower.unsqueeze(0)
+        upper = upper.unsqueeze(0)
+        # Expand input x to shape: (batch_size, bins)
+        x_expanded: torch.Tensor = x.expand(-1, self.bins)
+        # Compute the raw fractional activation.
+        fraction: torch.Tensor = (x_expanded - lower) / (upper - lower)
+        # Apply piecewise conditions:
+        # If x >= upper => output 1; if x < lower => output 0; otherwise use the fraction.
+        ones_tensor: torch.Tensor = torch.ones_like(fraction)
+        zeros_tensor: torch.Tensor = torch.zeros_like(fraction)
+        e: torch.Tensor = torch.where(x_expanded >= upper, ones_tensor, fraction)
+        e = torch.where(x_expanded < lower, zeros_tensor, e)
+        # Fuse the T-dimensional vector through a linear layer.
+        embedding: torch.Tensor = self.fusion(e)
         return embedding
 
 
 class PeriodicEmbedding(EmbeddingModule):
     """
-    Implements the Periodic Embedding module based on periodic activation functions.
-    Each scalar feature is processed with a periodic transform: phi = sin(k * x + c),
-    where 'k' is a scaling factor and 'c' is a trainable offset parameter.
-    An additional linear layer is applied on top to fuse the periodic representation.
-
-    Hyperparameters:
-        - k_range: A list of two integers [min, max] specifying the allowed range for k.
-        - sigma: The standard deviation to initialize c from N(0, sigma).
+    Periodic activation-based embedding module.
+    
+    Applies a sine-based periodic transformation with learnable offsets to the scalar input, then
+    fuses the output using a linear layer.
+    
+    Computation:
+      - Expand input x (shape: batch_size x 1) to (batch_size x k).
+      - Compute periodic features: sin(x * frequency + c), where
+          • frequency is a fixed vector (initialized as a linearly spaced tensor),
+          • c is a trainable parameter (initialized from N(0, sigma)).
+      - Fuse the periodic features with a linear fusion layer to yield the final embedding.
+    
+    Attributes:
+        k (int): Number of periodic components.
+        sigma (float): Standard deviation for initializing the trainable offsets c.
+        embedding_dim (int): Desired output embedding dimension.
+        c (nn.Parameter): Trainable parameter of shape (k,) representing offsets.
+        frequency (torch.Tensor): Fixed non-trainable frequency vector of shape (k,).
+        fusion (nn.Linear): Linear layer mapping the k periodic features to embedding_dim.
     """
-
-    def __init__(self, params: dict, embedding_dim: int) -> None:
+    def __init__(
+        self,
+        k: int = 10,
+        sigma: float = 0.1,
+        embedding_dim: int = 32
+    ) -> None:
         """
-        Initializes the PeriodicEmbedding module.
-
+        Initialize the PeriodicEmbedding.
+        
         Args:
-            params (dict): Dictionary containing parameters for periodic embedding. Expects
-                           'periodic' key with 'k_range' (list) and 'sigma' (float).
-            embedding_dim (int): Output embedding dimension.
+            k (int): Number of periodic components (default: 10).
+            sigma (float): Standard deviation for offset initialization (default: 0.1).
+            embedding_dim (int): Desired output embedding dimension (default: 32).
         """
         super().__init__()
+        self.k: int = k
+        self.sigma: float = sigma
         self.embedding_dim: int = embedding_dim
-        periodic_params: dict = params.get("periodic", {})
-        k_range: List[int] = periodic_params.get("k_range", [1, 128])
-        self.sigma: float = periodic_params.get("sigma", 0.1)
-        # Set k to a default value. Here, we choose the lower bound of k_range.
-        self.k: float = float(k_range[0])
-        # Trainable offset c of shape [embedding_dim], initialized from N(0, sigma).
-        self.c: nn.Parameter = nn.Parameter(torch.randn(self.embedding_dim) * self.sigma)
-        # Extra linear layer to fuse the periodic representation.
-        self.linear: nn.Linear = nn.Linear(self.embedding_dim, self.embedding_dim)
+        # Initialize trainable offsets c from N(0, sigma) with shape (k,).
+        self.c: nn.Parameter = nn.Parameter(torch.randn(self.k) * self.sigma)
+        # Define a fixed frequency vector, here using a linear space from 1 to k.
+        self.register_buffer("frequency", torch.linspace(1.0, float(self.k), steps=self.k))
+        # Linear fusion layer mapping from k to embedding_dim.
+        self.fusion: nn.Linear = nn.Linear(self.k, self.embedding_dim, bias=True)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass for the PeriodicEmbedding module.
-
+        Forward pass for the periodic embedding.
+        
         Args:
-            x (Tensor): Input tensor of shape [batch_size, 1].
-
+            x (torch.Tensor): Tensor of shape (batch_size, 1) containing raw scalar features.
+        
         Returns:
-            Tensor: Final embedding tensor of shape [batch_size, embedding_dim].
+            torch.Tensor: Tensor of shape (batch_size, embedding_dim) with the final embedding.
         """
-        # Expand x to shape [batch_size, embedding_dim].
-        x_expanded: Tensor = x.expand(-1, self.embedding_dim)
-        # Compute the periodic activation: sin(k * x + c)
-        # self.c is broadcast to [1, embedding_dim].
-        phi: Tensor = torch.sin(self.k * x_expanded + self.c.unsqueeze(0))
-        # Fuse the periodic representation with an extra linear layer.
-        embedding: Tensor = self.linear(phi)
+        # Expand input x to shape (batch_size, k).
+        x_expanded: torch.Tensor = x.expand(-1, self.k)
+        # Reshape frequency and offset for broadcast: (1, k)
+        freq: torch.Tensor = self.frequency.unsqueeze(0)
+        offset: torch.Tensor = self.c.unsqueeze(0)
+        # Compute the periodic transformation.
+        periodic_out: torch.Tensor = torch.sin(x_expanded * freq + offset)
+        # Fuse the periodic features through the linear layer.
+        embedding: torch.Tensor = self.fusion(periodic_out)
         return embedding
 
 
-class LinearEmbedding(EmbeddingModule):
+class ResidualBlock(nn.Module):
     """
-    A baseline embedding module that uses a conventional linear layer to map
-    a scalar feature to an embedding vector.
-    """
+    A simple residual block used in ResNet-like backbones.
 
-    def __init__(self, embedding_dim: int) -> None:
+    Performs:
+      out = ReLU(linear2(ReLU(linear1(x))) + x)
+    """
+    def __init__(self, dim: int) -> None:
         """
-        Initializes the LinearEmbedding module.
-
+        Initialize the ResidualBlock.
+        
         Args:
-            embedding_dim (int): Output embedding dimension.
+            dim (int): Dimension of input and output.
         """
         super().__init__()
-        self.embedding_dim: int = embedding_dim
-        self.linear: nn.Linear = nn.Linear(1, self.embedding_dim)
-
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Forward pass for the LinearEmbedding module.
-
-        Args:
-            x (Tensor): Input tensor of shape [batch_size, 1].
-
-        Returns:
-            Tensor: Embedded representation of shape [batch_size, embedding_dim].
-        """
-        embedding: Tensor = self.linear(x)
-        return embedding
-
-
-# =============================================================================
-# Backbone Models
-# =============================================================================
-
-class MLP(nn.Module):
-    """
-    A simple Multi-Layer Perceptron (MLP) backbone that takes a flattened
-    concatenated embedding vector and produces a final prediction.
-    """
-
-    def __init__(self, config: dict, input_dim: int) -> None:
-        """
-        Initializes the MLP backbone.
-
-        Args:
-            config (dict): Configuration dictionary containing MLP settings.
-            input_dim (int): Dimensionality of the input vector (num_features * embedding_dim).
-        """
-        super().__init__()
-        backbone_config: dict = config.get("model", {}).get("backbone", {})
-        num_layers: int = backbone_config.get("mlp_layers", 4)
-        hidden_size: int = backbone_config.get("mlp_hidden_size", 256)
-        layers: List[nn.Module] = []
-        in_dim: int = input_dim
-        # Build hidden layers with ReLU activations.
-        for _ in range(num_layers - 1):
-            layers.append(nn.Linear(in_dim, hidden_size))
-            layers.append(nn.ReLU())
-            in_dim = hidden_size
-        # Final output layer: here we output a single value.
-        layers.append(nn.Linear(in_dim, 1))
-        self.net: nn.Sequential = nn.Sequential(*layers)
-
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Forward pass of the MLP.
-
-        Args:
-            x (Tensor): Input tensor of shape [batch_size, input_dim].
-
-        Returns:
-            Tensor: Model output.
-        """
-        return self.net(x)
-
-
-class ResNetBlock(nn.Module):
-    """
-    A basic ResNet block for fully connected layers with residual connections.
-    """
-
-    def __init__(self, in_dim: int, out_dim: int) -> None:
-        """
-        Initializes the ResNet block.
-
-        Args:
-            in_dim (int): Input dimension.
-            out_dim (int): Output dimension.
-        """
-        super().__init__()
-        self.fc1: nn.Linear = nn.Linear(in_dim, out_dim)
+        self.linear1: nn.Linear = nn.Linear(dim, dim)
         self.relu: nn.ReLU = nn.ReLU()
-        self.fc2: nn.Linear = nn.Linear(out_dim, out_dim)
-        if in_dim != out_dim:
-            self.shortcut: nn.Module = nn.Linear(in_dim, out_dim)
-        else:
-            self.shortcut = nn.Identity()
+        self.linear2: nn.Linear = nn.Linear(dim, dim)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of the ResNet block.
-
+        Forward pass for the residual block.
+        
         Args:
-            x (Tensor): Input tensor.
-
+            x (torch.Tensor): Input tensor of shape (batch_size, dim).
+        
         Returns:
-            Tensor: Output tensor after applying residual connection.
+            torch.Tensor: Output tensor of shape (batch_size, dim).
         """
-        identity: Tensor = self.shortcut(x)
-        out: Tensor = self.fc1(x)
+        residual = x
+        out = self.linear1(x)
         out = self.relu(out)
-        out = self.fc2(out)
-        out += identity
-        out = self.relu(out)
+        out = self.linear2(out)
+        out = self.relu(out + residual)
         return out
 
 
-class ResNet(nn.Module):
+class BackboneModel(nn.Module):
     """
-    A ResNet-like backbone that uses residual blocks to process
-    a flattened concatenated embedding vector.
+    Backbone model that integrates per-feature embedding modules with a chosen deep network.
+    
+    Supports three backbone types:
+      - "mlp": Concatenates embeddings and forwards through an MLP.
+      - "resnet": Concatenates embeddings and processes through residual blocks.
+      - "transformer": Stacks embeddings as tokens and processes via a Transformer encoder.
+    
+    Attributes:
+        embeddings (nn.ModuleList): List of individual embedding modules (one per numerical feature).
+        backbone_type (str): Type of backbone to use ("mlp", "resnet", "transformer").
+        backbone: Subnetwork processing the aggregated embedding.
     """
-
-    def __init__(self, config: dict, input_dim: int) -> None:
+    def __init__(self, embeddings: List[EmbeddingModule], params: dict) -> None:
         """
-        Initializes the ResNet backbone.
-
+        Initialize the BackboneModel.
+        
         Args:
-            config (dict): Configuration dictionary containing ResNet settings.
-            input_dim (int): Dimensionality of the input vector (num_features * embedding_dim).
+            embeddings (List[EmbeddingModule]): List of embedding modules, each handling a single feature.
+            params (dict): Backbone parameters. Expected keys:
+                - type: Backbone type ("mlp", "resnet", "transformer"). Default: "mlp".
+                - For MLP/ResNet: num_layers, layer_size, output_dim.
+                - For Transformer: num_layers, embedding_size, nhead, dim_feedforward, output_dim.
         """
         super().__init__()
-        backbone_config: dict = config.get("model", {}).get("backbone", {})
-        num_layers: int = backbone_config.get("mlp_layers", 4)
-        hidden_size: int = backbone_config.get("mlp_hidden_size", 256)
-        blocks: List[nn.Module] = []
-        in_dim: int = input_dim
-        for _ in range(num_layers - 1):
-            block = ResNetBlock(in_dim, hidden_size)
-            blocks.append(block)
-            in_dim = hidden_size
-        self.blocks: nn.Sequential = nn.Sequential(*blocks)
-        self.final_layer: nn.Linear = nn.Linear(in_dim, 1)
+        self.embeddings: nn.ModuleList = nn.ModuleList(embeddings)
+        self.backbone_type: str = params.get("type", "mlp").lower()
 
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Forward pass of the ResNet backbone.
+        if self.backbone_type == "mlp":
+            # MLP backbone: concatenate embeddings and process with fully connected layers.
+            num_layers: int = params.get("num_layers", 4)
+            layer_size: int = params.get("layer_size", 256)
+            output_dim: int = params.get("output_dim", 1)
+            input_dim: int = sum(e.embedding_dim for e in embeddings)
+            layers: List[nn.Module] = []
+            prev_dim: int = input_dim
+            for _ in range(num_layers):
+                layers.append(nn.Linear(prev_dim, layer_size))
+                layers.append(nn.ReLU())
+                prev_dim = layer_size
+            layers.append(nn.Linear(prev_dim, output_dim))
+            self.backbone: nn.Sequential = nn.Sequential(*layers)
 
-        Args:
-            x (Tensor): Input tensor of shape [batch_size, input_dim].
+        elif self.backbone_type == "resnet":
+            # ResNet backbone: concatenate embeddings and process with residual blocks.
+            num_layers: int = params.get("num_layers", 4)
+            layer_size: int = params.get("layer_size", 256)
+            output_dim: int = params.get("output_dim", 1)
+            input_dim: int = sum(e.embedding_dim for e in embeddings)
+            self.input_layer: nn.Linear = nn.Linear(input_dim, layer_size)
+            self.res_blocks: nn.ModuleList = nn.ModuleList(
+                [ResidualBlock(layer_size) for _ in range(num_layers)]
+            )
+            self.output_layer: nn.Linear = nn.Linear(layer_size, output_dim)
 
-        Returns:
-            Tensor: Model output.
-        """
-        out: Tensor = self.blocks(x)
-        out = self.final_layer(out)
-        return out
+        elif self.backbone_type == "transformer":
+            # Transformer backbone: stack embeddings as tokens and process with a Transformer encoder.
+            num_features: int = len(embeddings)
+            # Assume all embedding modules output the same dimension.
+            embedding_dim: int = embeddings[0].embedding_dim
+            # Optional linear projection to encode feature index information.
+            self.token_projection: nn.Linear = nn.Linear(embedding_dim, embedding_dim)
+            # Transformer encoder parameters.
+            num_layers: int = params.get("num_layers", 2)
+            d_model: int = params.get("embedding_size", embedding_dim)
+            nhead: int = params.get("nhead", 4)
+            dim_feedforward: int = params.get("dim_feedforward", d_model * 4)
+            encoder_layer: nn.TransformerEncoderLayer = nn.TransformerEncoderLayer(
+                d_model=d_model,
+                nhead=nhead,
+                dim_feedforward=dim_feedforward
+            )
+            self.transformer_encoder: nn.TransformerEncoder = nn.TransformerEncoder(
+                encoder_layer, num_layers=num_layers
+            )
+            output_dim: int = params.get("output_dim", 1)
+            self.transformer_fc: nn.Linear = nn.Linear(d_model, output_dim)
 
-
-class TransformerModel(nn.Module):
-    """
-    A Transformer-based backbone model that processes per-feature embeddings
-    as tokens. An extra token injection layer is applied to provide feature indexing,
-    and the transformer encoder aggregates the token information.
-    """
-
-    def __init__(self, config: dict, input_dim: Optional[int], num_features: int, embedding_dim: int) -> None:
-        """
-        Initializes the Transformer backbone.
-
-        Args:
-            config (dict): Configuration dictionary containing transformer settings.
-            input_dim (Optional[int]): Not used for Transformer since inputs are 3D tokens.
-            num_features (int): Number of feature tokens.
-            embedding_dim (int): Dimensionality of each token (embedding dimension).
-        """
-        super().__init__()
-        self.num_features: int = num_features
-        self.embedding_dim: int = embedding_dim
-        # Token injection layer for feature-specific information.
-        self.token_injection: nn.Linear = nn.Linear(self.embedding_dim, self.embedding_dim)
-        # Set number of heads based on embedding dimension (default to 8 if divisible, else 1).
-        nhead: int = 8 if self.embedding_dim >= 8 and self.embedding_dim % 8 == 0 else 1
-        # Number of transformer layers; default is 2 if not provided.
-        backbone_config: dict = config.get("model", {}).get("backbone", {})
-        num_layers: int = backbone_config.get("transformer_layers", 2)
-        encoder_layer: nn.TransformerEncoderLayer = nn.TransformerEncoderLayer(
-            d_model=self.embedding_dim, nhead=nhead
-        )
-        self.transformer_encoder: nn.TransformerEncoder = nn.TransformerEncoder(
-            encoder_layer, num_layers=num_layers
-        )
-        # Final aggregation: average pooling over tokens, followed by a linear head.
-        self.final_layer: nn.Linear = nn.Linear(self.embedding_dim, 1)
-
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Forward pass of the Transformer backbone.
-
-        Args:
-            x (Tensor): Input tensor of shape [batch_size, num_features, embedding_dim].
-
-        Returns:
-            Tensor: Model output.
-        """
-        # Inject token information.
-        x = self.token_injection(x)  # Shape: [batch_size, num_features, embedding_dim]
-        # Transformer expects input shape: [seq_len, batch_size, embedding_dim]
-        x = x.transpose(0, 1)  # Now shape: [num_features, batch_size, embedding_dim]
-        x = self.transformer_encoder(x)
-        # Transpose back: [batch_size, num_features, embedding_dim]
-        x = x.transpose(0, 1)
-        # Aggregate token outputs by averaging over the feature dimension.
-        x = x.mean(dim=1)  # Shape: [batch_size, embedding_dim]
-        out: Tensor = self.final_layer(x)
-        return out
-
-
-# =============================================================================
-# Model Wrapper
-# =============================================================================
-
-class Model(nn.Module):
-    """
-    Combines per-feature embedding modules with the chosen backbone.
-    Instantiates one embedding module per numerical feature (without parameter sharing)
-    and processes each feature independently before aggregation.
-    """
-
-    def __init__(self, config: dict, num_features: int) -> None:
-        """
-        Initializes the Model wrapper.
-
-        Args:
-            config (dict): Configuration dictionary containing model, embedding, and backbone settings.
-            num_features (int): Number of numerical features in the input.
-        """
-        super().__init__()
-        self.num_features: int = num_features
-        # Determine which embedding type to use.
-        embedding_type: str = config.get("model", {}).get("embedding", {}).get("type", "LR")
-        # Get embedding dimension from backbone settings.
-        embedding_dim: int = config.get("model", {}).get("backbone", {}).get("mlp_hidden_size", 256)
-        self.embeddings: nn.ModuleList = nn.ModuleList()
-
-        # Instantiate one embedding module per feature.
-        for _ in range(num_features):
-            if embedding_type in ["PLE_q", "PLE_t"]:
-                # Determine strategy: "quantile" for PLE_q, "target_aware" for PLE_t.
-                strategy: str = "quantile" if embedding_type == "PLE_q" else "target_aware"
-                ple = PiecewiseLinearEmbedding(config.get("data", {}), embedding_dim, strategy=strategy)
-                self.embeddings.append(ple)
-            elif embedding_type == "Periodic":
-                periodic = PeriodicEmbedding(config.get("embedding", {}), embedding_dim)
-                self.embeddings.append(periodic)
-            elif embedding_type == "LR":
-                lr = LinearEmbedding(embedding_dim)
-                self.embeddings.append(lr)
-            else:
-                raise ValueError(f"Unknown embedding type: {embedding_type}")
-
-        # Instantiate the backbone model based on configuration.
-        backbone_type: str = config.get("model", {}).get("backbone", {}).get("type", "MLP")
-        if backbone_type in ["MLP", "ResNet"]:
-            # For MLP and ResNet, input is a concatenated vector.
-            input_dim: int = num_features * embedding_dim
-        elif backbone_type == "Transformer":
-            # For Transformer, the backbone will expect a token sequence.
-            input_dim = None  # Not needed for TransformerModel.
         else:
-            raise ValueError(f"Unknown backbone type: {backbone_type}")
+            raise ValueError(f"Unsupported backbone type: {self.backbone_type}")
 
-        if backbone_type == "MLP":
-            self.backbone: nn.Module = MLP(config, input_dim)
-        elif backbone_type == "ResNet":
-            self.backbone = ResNet(config, input_dim)
-        elif backbone_type == "Transformer":
-            self.backbone = TransformerModel(config, input_dim, num_features, embedding_dim)
-        else:
-            raise ValueError(f"Unknown backbone type: {backbone_type}")
-        self.backbone_type: str = backbone_type
-
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Forward pass of the combined model.
-
+        Forward pass for the BackboneModel.
+        
         Args:
-            x (Tensor): Input tensor of shape [batch_size, num_features].
-
+            x (torch.Tensor): Tensor of shape (batch_size, num_features) where each column is a numerical feature.
+        
         Returns:
-            Tensor: Final model output.
+            torch.Tensor: Model predictions.
         """
-        batch_size, n_features = x.size()
-        if n_features != self.num_features:
-            raise ValueError(f"Expected input with {self.num_features} features, got {n_features}")
-
-        # Apply each embedding module to its corresponding feature.
-        embedded_features: List[Tensor] = []
+        embedded_features: List[torch.Tensor] = []
+        # Process each feature separately using its corresponding embedding module.
         for i, embedding_module in enumerate(self.embeddings):
-            # Extract the i-th feature column: shape [batch_size, 1].
-            feature_input: Tensor = x[:, i].unsqueeze(1)
-            embedded: Tensor = embedding_module(feature_input)  # Shape: [batch_size, embedding_dim]
-            embedded_features.append(embedded)
+            feature: torch.Tensor = x[:, i].unsqueeze(1)  # Shape: (batch_size, 1)
+            emb: torch.Tensor = embedding_module(feature)
+            embedded_features.append(emb)
 
-        # Depending on the backbone, aggregate the embeddings.
-        if self.backbone_type in ["MLP", "ResNet"]:
-            # Concatenate embeddings to form a flat vector.
-            concatenated: Tensor = torch.cat(embedded_features, dim=1)  # Shape: [batch_size, num_features * embedding_dim]
-            output: Tensor = self.backbone(concatenated)
-        elif self.backbone_type == "Transformer":
-            # Stack embeddings as tokens: shape: [batch_size, num_features, embedding_dim]
-            tokens: Tensor = torch.stack(embedded_features, dim=1)
-            output = self.backbone(tokens)
+        if self.backbone_type in ["mlp", "resnet"]:
+            # Concatenate embeddings into a flat vector.
+            concatenated: torch.Tensor = torch.cat(embedded_features, dim=1)
+            if self.backbone_type == "mlp":
+                output: torch.Tensor = self.backbone(concatenated)
+            else:
+                x_res: torch.Tensor = self.input_layer(concatenated)
+                for block in self.res_blocks:
+                    x_res = block(x_res)
+                output = self.output_layer(x_res)
+            return output
+
+        elif self.backbone_type == "transformer":
+            # Stack embeddings as tokens: shape (batch_size, num_features, embedding_dim).
+            tokens: torch.Tensor = torch.stack(embedded_features, dim=1)
+            tokens = self.token_projection(tokens)
+            # Transformer encoder expects input shape (sequence_length, batch_size, d_model).
+            tokens = tokens.transpose(0, 1)
+            transformer_out: torch.Tensor = self.transformer_encoder(tokens)
+            transformer_out = transformer_out.transpose(0, 1)
+            # Pool tokens by averaging.
+            pooled: torch.Tensor = transformer_out.mean(dim=1)
+            output: torch.Tensor = self.transformer_fc(pooled)
+            return output
+
         else:
-            raise ValueError(f"Unknown backbone type: {self.backbone_type}")
-
-        return output
+            raise ValueError(f"Unsupported backbone type: {self.backbone_type}")
 ```

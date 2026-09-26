@@ -1,109 +1,103 @@
 ----------------------------------------
 [Implementation approach]
-We will implement a modular Python system using PyTorch for the deep learning backend, scikit-learn for data preprocessing (e.g., quantile transformation and train/test splits), and Optuna for hyperparameter tuning. The system will support multiple embedding modules (Piecewise Linear Embedding, Periodic Embedding, and a conventional linear embedding) which feed into backbone models (MLP, ResNet, and Transformer). Each module is encapsulated into its own file and class. The design is simple and configurable via a central configuration dictionary, allowing users to switch embedding modules and backbones, set hyperparameters, and log training progress. The system will also include data loaders, training loops with early stopping, and evaluation routines for computing metrics and ensemble results.
+We will implement the system in Python using PyTorch for modeling and training, Scikit-learn for data preprocessing and dataset splitting, and Optuna for hyperparameter tuning. The system is structured into modular components: a dataset loader to handle data reading and preprocessing (including quantile transformation and one-hot encoding for categorical data), embedding modules (implementing both Piecewise Linear Encoding and Periodic Activation functions), backbone models (MLP, ResNet, and Transformer variants), a trainer to manage the training loop with early stopping and logging, and an evaluation module to compute metrics such as accuracy and RMSE on validation and test sets. The design emphasizes clear APIs and a simple file structure, making effective use of open-source libraries.
 
 ----------------------------------------
 [File list]
 - main.py
+- config.py
 - dataset_loader.py
 - model.py
 - trainer.py
 - evaluation.py
+- utils.py
 
 ----------------------------------------
 [Data structures and interfaces]
 classDiagram
-    class Main {
-        +__init__(config: dict)
+    class MainApp {
+        +__init__(config: dict) 
         +run_experiment() -> None
+    }
+    class Config {
+        +load_config() -> dict
     }
     class DatasetLoader {
         +__init__(config: dict)
-        +load_data() -> Tuple[Any, Any, Any]  // (train_loader, valid_loader, test_loader)
+        +load_data() -> DataBundle
+    }
+    class DataBundle {
+        +train: Any
+        +val: Any
+        +test: Any
     }
     class EmbeddingModule {
         <<abstract>>
-        +__init__(params: dict)
         +forward(x: Tensor) -> Tensor
     }
-    class PiecewiseLinearEmbedding {
-        +__init__(params: dict)
-        +compute_bins(data: Tensor) -> List[float]
+    class PLEEmbedding {
+        +__init__(bins: int, method: str)  
         +forward(x: Tensor) -> Tensor
     }
     class PeriodicEmbedding {
-        +__init__(params: dict)
+        +__init__(k: int, sigma: float)
         +forward(x: Tensor) -> Tensor
     }
-    class LinearEmbedding {
-        +__init__(params: dict)
+    class BackboneModel {
+        +__init__(embeddings: List[EmbeddingModule], params: dict)
         +forward(x: Tensor) -> Tensor
     }
-    class Backbone {
-        <<abstract>>
-        +__init__(config: dict)
-        +forward(x: Tensor) -> Tensor
-    }
-    class MLP {
-        +__init__(config: dict)
-        +forward(x: Tensor) -> Tensor
-    }
-    class ResNet {
-        +__init__(config: dict)
-        +forward(x: Tensor) -> Tensor
-    }
-    class TransformerModel {
-        +__init__(config: dict)
-        +forward(x: Tensor) -> Tensor
-    }
-    class Model {
-        +__init__(params: dict) 
-        +forward(x: Tensor) -> Tensor
-    }
-    Model o-- EmbeddingModule : uses
-    Model o-- Backbone : uses
     class Trainer {
-        +__init__(model: Model, train_loader: Any, valid_loader: Any, config: dict)
-        +train() -> Model
+        +__init__(model: BackboneModel, data: DataBundle, config: dict)
+        +train() -> None
+        +save_model() -> None
     }
-    class Evaluation {
-        +__init__(model: Model, test_loader: Any, config: dict)
+    class Evaluator {
+        +__init__(model: BackboneModel, data: DataBundle)
         +evaluate() -> dict
     }
-    Main --> DatasetLoader
-    Main --> Model
-    Main --> Trainer
-    Main --> Evaluation
-    Trainer --> Model
-    Evaluation --> Model
-
+    MainApp --> DatasetLoader
+    MainApp --> Trainer
+    MainApp --> Evaluator
+    Trainer --> BackboneModel
+    BackboneModel --> EmbeddingModule
+    PLEEmbedding --|> EmbeddingModule
+    PeriodicEmbedding --|> EmbeddingModule
 
 ----------------------------------------
 [Program call flow]
 sequenceDiagram
-    participant M as Main
+    participant M as MainApp
+    participant C as Config
     participant DL as DatasetLoader
-    participant MD as Model
+    participant DB as DataBundle
+    participant BM as BackboneModel
+    participant EM as EmbeddingModule
     participant TR as Trainer
-    participant EV as Evaluation
+    participant EV as Evaluator
 
-    M->>DL: __init__(config) & load_data()
-    DL-->>M: (train_loader, valid_loader, test_loader)
-    M->>MD: __init__(params) to build embedding and backbone
-    M->>TR: __init__(model, train_loader, valid_loader, config)
-    TR->>MD: Call forward(x) for each batch during training
-    TR-->>M: Return best trained model (after early stopping)
-    M->>EV: __init__(best_model, test_loader, config)
-    EV->>MD: Call forward(x) for test batches
-    MD-->>EV: Return predictions
-    EV-->>M: Return evaluation metrics (e.g., RMSE or Accuracy)
-
+    M->>C: load_config()
+    C-->>M: return config dict
+    M->>DL: new DatasetLoader(config)
+    DL->>DL: load and preprocess data
+    DL-->>M: return DataBundle {train, val, test}
+    M->>BM: initialize BackboneModel(embeddings, model_params)
+    BM->>EM: initialize each embedding module (PLEEmbedding / PeriodicEmbedding)
+    M->>TR: new Trainer(BM, DataBundle, config)
+    TR->>BM: call model.forward(x) during training loop
+    BM-->>TR: return predictions
+    TR->>TR: compute loss (MSE or CrossEntropy) using predictions & targets
+    TR->>TR: update model with AdamW optimizer
+    TR->>TR: implement early stopping (patience=16 epochs)
+    TR-->>M: training complete
+    M->>EV: new Evaluator(BM, DataBundle)
+    EV->>BM: call model.forward(x) on validation/test splits
+    BM-->>EV: return predictions
+    EV->>M: return evaluation metrics (accuracy, RMSE, parameter count)
+    M->>M: optionally ensemble predictions from multiple runs
+    M-->>Console: print final results and logs
 
 ----------------------------------------
 [Anything UNCLEAR]
-Clarification is needed on the following details: 
- - The precise PLE interpolation formula especially the boundary conditions (x < b0 and x ≥ bT) for each feature.
- - The detailed hyperparameter distributions (e.g., σ and k for periodic embeddings, decision tree parameters for target-aware PLE).
- - The exact dataset preprocessing steps (batch sizes, specific quantile transformation parameters) required for each dataset as reported in the paper.
- - Any additional logging or checkpointing requirements.
+Clarification is needed on the exact mathematical formulation of the periodic activation embedding (e.g., specific periodic function and parameter shapes) and how feature mixing is managed before/after applying the periodic functions. Additionally, details on the expected dataset formats (especially for the various public datasets mentioned) and any specialized hyperparameter settings for backbones (MLP, ResNet, Transformer) need confirmation from the experimental appendix.
 
