@@ -67,91 +67,52 @@ The experiment trains the number of models configured by `evaluation.num_seeds`,
 
 ## End-to-end paper-to-code workflow
 
-The diagram below shows how a paper PDF is converted to structured JSON, processed by the Paper2Code agents on the `ple-paper` branch, and used to generate and run the implementation in this repository. The planning, analysis, and coding stage names follow [Paper2Code's run log](https://github.com/jimthompson5802/Paper2Code/blob/ple-paper/outputs/ple-paper_run_log.txt). Script steps are shown separately from agent stages.
+These five diagrams split the paper-to-code process into slide-sized stages. Each output handoff is repeated as the next diagram's input. Agent stages follow [Paper2Code's run log](https://github.com/jimthompson5802/Paper2Code/blob/ple-paper/outputs/ple-paper_run_log.txt); scripts are identified separately.
+
+### 1. PDF conversion
 
 ```mermaid
-flowchart TD
-  pdf[Academic paper PDF]
+flowchart LR
+  pdf[Academic paper PDF] --> grobid[Grobid parses PDF] --> tei[TEI XML] --> convert[s2orc-doc2json converts TEI to S2ORC JSON] --> json[Structured paper JSON]
+```
 
-  subgraph converter["s2orc-doc2json"]
-    grobid["Grobid parses PDF into TEI XML"]
-    s2json["Convert TEI XML to S2ORC JSON"]
-    grobid --> s2json
-  end
+### 2. Planning
 
-  pdf --> grobid
-  s2json --> json["Structured paper JSON"]
+```mermaid
+flowchart LR
+  json[Structured paper JSON] --> clean[Script: codes/0_pdf_process.py<br/>Clean JSON]
+  clean --> plan["[Planning] Overall plan"] --> architecture["[Planning] Architecture design"] --> logic["[Planning] Logic design"] --> config["[Planning] Configuration file generation"]
+  config --> extract[Script: codes/1.1_extract_config.py<br/>Extract config and artifacts] --> output[Planning artifacts and configuration]
+  planning_usage["LLM: o3-mini<br/>Input: 6,906 | Cached: 101,504<br/>Output: 13,283 | Cost: $0.12186900"]
+  config -. usage .-> planning_usage
+```
 
-  subgraph papercoder["Paper2Code on branch ple-paper"]
-    clean["Script: codes/0_pdf_process.py<br/>Clean paper JSON"]
+### 3. Analysis
 
-    subgraph planning["Planning agents"]
-      plan["[Planning] Overall plan"]
-      architecture["[Planning] Architecture design"]
-      logic["[Planning] Logic design"]
-      config["[Planning] Configuration file generation"]
-      plan --> architecture --> logic --> config
-    end
+```mermaid
+flowchart LR
+  input[Planning artifacts and configuration] --> cfg["[ANALYSIS] config.py"] --> loader["[ANALYSIS] dataset_loader.py"] --> model["[ANALYSIS] model.py"] --> utils["[ANALYSIS] utils.py"] --> trainer["[ANALYSIS] trainer.py"] --> evaluation["[ANALYSIS] evaluation.py"] --> main["[ANALYSIS] main.py"] --> output[Analyzed module specifications]
+  analysis_usage["LLM: o3-mini<br/>Input: 7,521 | Cached: 194,304<br/>Output: 30,295 | Cost: $0.24843830"]
+  main -. usage .-> analysis_usage
+```
 
-    planning_usage["LLM: o3-mini<br/>Input: 6,906 tokens<br/>Cached input: 101,504 tokens<br/>Output: 13,283 tokens<br/>Cost: $0.12186900"]
-    planning -. usage .-> planning_usage
+### 4. Coding
 
-    extract["Script: codes/1.1_extract_config.py<br/>Extract configuration and planning artifacts"]
+```mermaid
+flowchart LR
+  input[Analyzed module specifications] --> cfg["[CODING] config.py"] --> loader["[CODING] dataset_loader.py"] --> model["[CODING] model.py"] --> utils["[CODING] utils.py"] --> trainer["[CODING] trainer.py"] --> evaluation["[CODING] evaluation.py"] --> main["[CODING] main.py"]
+  main --> generated[Generated source: Paper2Code/outputs/ple-paper_repo] --> implementation[paper2code-ple/ple-paper_repo]
+  coding_usage["LLM: o3-mini<br/>Input: 37,235 | Cached: 221,312<br/>Output: 49,610 | Cost: $0.38096410"]
+  main -. usage .-> coding_usage
+  total_usage["Run total: o3-mini<br/>Input: 51,662 | Cached: 517,120<br/>Output: 93,188<br/>Accumulated cost: $0.75127140"]
+  generated -. total usage .-> total_usage
+```
 
-    subgraph analysis["Analysis agents"]
-      a_config["[ANALYSIS] config.py"]
-      a_loader["[ANALYSIS] dataset_loader.py"]
-      a_model["[ANALYSIS] model.py"]
-      a_utils["[ANALYSIS] utils.py"]
-      a_trainer["[ANALYSIS] trainer.py"]
-      a_eval["[ANALYSIS] evaluation.py"]
-      a_main["[ANALYSIS] main.py"]
-      a_config --> a_loader --> a_model --> a_utils --> a_trainer --> a_eval --> a_main
-    end
+### 5. Run the generated implementation
 
-    analysis_usage["LLM: o3-mini<br/>Input: 7,521 tokens<br/>Cached input: 194,304 tokens<br/>Output: 30,295 tokens<br/>Cost: $0.24843830"]
-    analysis -. usage .-> analysis_usage
-
-    subgraph coding["Coding agents"]
-      c_config["[CODING] config.py"]
-      c_loader["[CODING] dataset_loader.py"]
-      c_model["[CODING] model.py"]
-      c_utils["[CODING] utils.py"]
-      c_trainer["[CODING] trainer.py"]
-      c_eval["[CODING] evaluation.py"]
-      c_main["[CODING] main.py"]
-      c_config --> c_loader --> c_model --> c_utils --> c_trainer --> c_eval --> c_main
-    end
-
-    coding_usage["LLM: o3-mini<br/>Input: 37,235 tokens<br/>Cached input: 221,312 tokens<br/>Output: 49,610 tokens<br/>Cost: $0.38096410"]
-    coding -. usage .-> coding_usage
-
-    generated["Generated source repository<br/>Paper2Code/outputs/ple-paper_repo"]
-
-    clean --> plan
-    config --> extract --> a_config
-    a_main --> c_config
-    c_main --> generated
-  end
-
-  total_usage["Run total, LLM: o3-mini<br/>Input: 51,662 tokens<br/>Cached input: 517,120 tokens<br/>Output: 93,188 tokens<br/>Accumulated cost: $0.75127140"]
-  papercoder -. usage .-> total_usage
-
-  json --> clean
-  generated -->|"Use generated implementation here"| implementation["paper2code-ple/ple-paper_repo"]
-
-  subgraph runtime["Run the generated implementation"]
-    run["Run: python main.py"]
-    load["Load configuration and dataset CSV"]
-    prepare["Preprocess and split data"]
-    build["Build feature embeddings and model"]
-    train["Train models with validation and early stopping"]
-    evaluate["Evaluate validation and test data; aggregate ensemble results"]
-    results["Report metrics and save best_model.pt"]
-    run --> load --> prepare --> build --> train --> evaluate --> results
-  end
-
-  implementation --> run
+```mermaid
+flowchart LR
+  implementation[paper2code-ple/ple-paper_repo] --> run[Run: python main.py] --> data[Load configured dataset] --> preprocess[Preprocess and split data] --> build[Build embeddings and model] --> train[Train configured runs] --> evaluate[Evaluate validation and test sets] --> output[Report metrics and save best_model.pt]
 ```
 
 ## Configure another dataset
