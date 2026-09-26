@@ -78,7 +78,7 @@ flowchart LR
   class json transition
 ```
 
-### 2. Planning
+### 2. Paper2Code: Planning
 
 ```mermaid
 flowchart TB
@@ -99,7 +99,7 @@ flowchart TB
   planning -. usage .-> planning_usage
 ```
 
-### 3. Analysis
+### 3. Paper2Code: Analysis
 
 ```mermaid
 flowchart TB
@@ -119,7 +119,7 @@ flowchart TB
   analysis -. usage .-> analysis_usage
 ```
 
-### 4. Coding
+### 4. Paper2Code: Coding
 
 ```mermaid
 flowchart TB
@@ -140,7 +140,7 @@ flowchart TB
   coding -. usage .-> coding_usage
 ```
 
-### Paper2Code Overall
+### Paper2Code: Overall
 ```mermaid
 flowchart TB
   paper2code["Planning/Analysis/Coding"]
