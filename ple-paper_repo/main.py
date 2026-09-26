@@ -136,8 +136,15 @@ def main() -> None:
     print(config_dict)
 
     # Load dataset once to use fixed data splits for ensemble evaluation.
-    dataset_path: str = os.path.join("data", "dataset.csv")
-    target_column: str = "target"  # Default target column name
+    training_config: Dict[str, Any] = config_dict.get("training", {})
+    configured_dataset_path: str = training_config.get("data_fp", "data/dataset.csv")
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    dataset_path: str = (
+        configured_dataset_path
+        if os.path.isabs(configured_dataset_path)
+        else os.path.join(project_dir, configured_dataset_path)
+    )
+    target_column: str = training_config.get("target_column", "target")
     dataset_loader: DatasetLoader = DatasetLoader(config=config_dict, dataset_path=dataset_path, target_column=target_column)
     data_bundle: DataBundle = dataset_loader.load_data()
     # Determine number of features from training data.

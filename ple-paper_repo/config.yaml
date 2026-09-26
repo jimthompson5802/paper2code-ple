@@ -1,6 +1,8 @@
 ## config.yaml
 training:
   optimizer: "AdamW"  # Using AdamW optimizer as specified in the paper.
+  data_fp: "data/ca-housing.csv"
+  target_column: "MedHouseVal"
   learning_rate_range: [5e-05, 0.005]  # MLP hyperparameter search range from LogUniform[5e-5, 0.005].
   batch_size: 128  # Default batch size; actual values may be dataset-specific.
   max_epochs: 100  # Number of epochs/iterations as used in the experiments.
