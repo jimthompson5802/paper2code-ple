@@ -94,7 +94,7 @@ flowchart TD
     end
 
     planning_usage["LLM: o3-mini<br/>Input: 6,906 tokens<br/>Cached input: 101,504 tokens<br/>Output: 13,283 tokens<br/>Cost: $0.12186900"]
-    config -. usage .-> planning_usage
+    planning -. usage .-> planning_usage
 
     extract["Script: codes/1.1_extract_config.py<br/>Extract configuration and planning artifacts"]
 
@@ -110,7 +110,7 @@ flowchart TD
     end
 
     analysis_usage["LLM: o3-mini<br/>Input: 7,521 tokens<br/>Cached input: 194,304 tokens<br/>Output: 30,295 tokens<br/>Cost: $0.24843830"]
-    a_main -. usage .-> analysis_usage
+    analysis -. usage .-> analysis_usage
 
     subgraph coding["Coding agents"]
       c_config["[CODING] config.py"]
@@ -124,18 +124,18 @@ flowchart TD
     end
 
     coding_usage["LLM: o3-mini<br/>Input: 37,235 tokens<br/>Cached input: 221,312 tokens<br/>Output: 49,610 tokens<br/>Cost: $0.38096410"]
-    c_main -. usage .-> coding_usage
+    coding -. usage .-> coding_usage
 
     generated["Generated source repository<br/>Paper2Code/outputs/ple-paper_repo"]
-
-    total_usage["Run total, LLM: o3-mini<br/>Input: 51,662 tokens<br/>Cached input: 517,120 tokens<br/>Output: 93,188 tokens<br/>Accumulated cost: $0.75127140"]
 
     clean --> plan
     config --> extract --> a_config
     a_main --> c_config
     c_main --> generated
-    generated -. usage .-> total_usage
   end
+
+  total_usage["Run total, LLM: o3-mini<br/>Input: 51,662 tokens<br/>Cached input: 517,120 tokens<br/>Output: 93,188 tokens<br/>Accumulated cost: $0.75127140"]
+  papercoder -. usage .-> total_usage
 
   json --> clean
   generated -->|"Use generated implementation here"| implementation["paper2code-ple/ple-paper_repo"]
