@@ -24,6 +24,8 @@ import os
 import sys
 import copy
 import random
+from typing import Any
+
 import yaml
 import numpy as np
 import torch
@@ -59,7 +61,7 @@ def set_all_seeds(seed: int) -> None:
 # This function trains the model on training set and evaluates on the validation set.
 # For regression tasks, returns RMSE; for classification, returns (1 - accuracy) to minimize.
 # ---------------------------------------------------------------------
-def objective(trial: optuna.trial.Trial, base_config: dict, train_loader, valid_loader, num_features: int) -> float:
+def objective(trial: Any, base_config: dict, train_loader, valid_loader, num_features: int) -> float:
     # Create a deep copy of the base config to update with trial suggestions.
     config = copy.deepcopy(base_config)
     
@@ -143,7 +145,8 @@ def objective(trial: optuna.trial.Trial, base_config: dict, train_loader, valid_
 # ---------------------------------------------------------------------
 def main() -> None:
     # 1. Load configuration from config.yaml
-    config_file: str = "config.yaml"
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    config_file: str = os.path.join(project_dir, "config.yaml")
     if not os.path.isfile(config_file):
         print(f"Configuration file '{config_file}' not found.", file=sys.stderr)
         sys.exit(1)
@@ -156,6 +159,8 @@ def main() -> None:
             sys.exit(1)
     
     print("Configuration loaded:")
+    # convert to float
+    config["training"]["learning_rate"] = float(config.get("training", {}).get("learning_rate", 1e-3))
     print(config)
     
     # 2. Set random seed
@@ -166,10 +171,14 @@ def main() -> None:
     
     # 3. Data Loading and Preprocessing
     # ----
-    # For demonstration, we assume a default dataset file and target column.
-    # Adjust file_path and target_col accordingly.
-    default_file_path: str = "data/dataset.csv"  # Change to your dataset file path
-    default_target_col: str = "target"           # Change to your dataset target column name
+    data_config = config.get("data", {})
+    configured_file_path = data_config.get("file_path", "data/ca-housing.csv")
+    default_file_path = (
+        configured_file_path
+        if os.path.isabs(configured_file_path)
+        else os.path.join(project_dir, configured_file_path)
+    )
+    default_target_col: str = data_config.get("target_col", "MedHouseVal")
     
     try:
         dataset_loader = DatasetLoader(config=config, file_path=default_file_path, target_col=default_target_col)

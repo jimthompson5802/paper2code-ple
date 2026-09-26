@@ -14,6 +14,8 @@ model:
   embedding:
     type: "PLE_q"      # Options: LR, PLE_q (quantile-based), PLE_t (target-aware), Periodic.
 data:
+  file_path: "data/ca-housing.csv"
+  target_col: "MedHouseVal"
   preprocessing: "quantile"   # Use quantile transformation for all datasets except Otto Group.
   quantile_bins: 256          # Number of bins for quantile-based PLE (tuned between 2 and 256)
   target_aware_params:
