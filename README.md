@@ -80,17 +80,19 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  subgraph planning_top[" "]
+  json[Structured paper JSON]
+  subgraph planning["Planning"]
     direction LR
-    json[Structured paper JSON] --> clean[Script: codes/0_pdf_process.py<br/>Clean JSON] --> plan["[Planning] Overall plan"] --> architecture["[Planning] Architecture design"]
+    clean[Script: codes/0_pdf_process.py<br/>Clean JSON] --> plan["[Planning] Overall plan"] --> architecture["[Planning] Architecture design"]
+    logic["[Planning] Logic design"] --> config["[Planning] Configuration file generation"] --> extract[Script: codes/1.1_extract_config.py<br/>Extract config and artifacts]
   end
-  subgraph planning_bottom[" "]
-    direction LR
-    logic["[Planning] Logic design"] --> config["[Planning] Configuration file generation"] --> extract[Script: codes/1.1_extract_config.py<br/>Extract config and artifacts] --> output[Planning artifacts and configuration]
-  end
+  output[Planning artifacts and configuration]
+
+  json --> clean
   architecture --> logic
+  extract --> output
   planning_usage["LLM: o3-mini<br/>Input: 6,906 | Cached: 101,504<br/>Output: 13,283 | Cost: $0.12186900"]
-  config -. usage .-> planning_usage
+  planning -. usage .-> planning_usage
 ```
 
 ### 3. Analysis
