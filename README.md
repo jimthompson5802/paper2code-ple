@@ -79,10 +79,16 @@ flowchart LR
 ### 2. Planning
 
 ```mermaid
-flowchart LR
-  json[Structured paper JSON] --> clean[Script: codes/0_pdf_process.py<br/>Clean JSON]
-  clean --> plan["[Planning] Overall plan"] --> architecture["[Planning] Architecture design"] --> logic["[Planning] Logic design"] --> config["[Planning] Configuration file generation"]
-  config --> extract[Script: codes/1.1_extract_config.py<br/>Extract config and artifacts] --> output[Planning artifacts and configuration]
+flowchart TB
+  subgraph planning_top[" "]
+    direction LR
+    json[Structured paper JSON] --> clean[Script: codes/0_pdf_process.py<br/>Clean JSON] --> plan["[Planning] Overall plan"] --> architecture["[Planning] Architecture design"]
+  end
+  subgraph planning_bottom[" "]
+    direction LR
+    logic["[Planning] Logic design"] --> config["[Planning] Configuration file generation"] --> extract[Script: codes/1.1_extract_config.py<br/>Extract config and artifacts] --> output[Planning artifacts and configuration]
+  end
+  architecture --> logic
   planning_usage["LLM: o3-mini<br/>Input: 6,906 | Cached: 101,504<br/>Output: 13,283 | Cost: $0.12186900"]
   config -. usage .-> planning_usage
 ```
@@ -90,8 +96,16 @@ flowchart LR
 ### 3. Analysis
 
 ```mermaid
-flowchart LR
-  input[Planning artifacts and configuration] --> cfg["[ANALYSIS] config.py"] --> loader["[ANALYSIS] dataset_loader.py"] --> model["[ANALYSIS] model.py"] --> utils["[ANALYSIS] utils.py"] --> trainer["[ANALYSIS] trainer.py"] --> evaluation["[ANALYSIS] evaluation.py"] --> main["[ANALYSIS] main.py"] --> output[Analyzed module specifications]
+flowchart TB
+  subgraph analysis_top[" "]
+    direction LR
+    input[Planning artifacts and configuration] --> cfg["[ANALYSIS] config.py"] --> loader["[ANALYSIS] dataset_loader.py"] --> model["[ANALYSIS] model.py"] --> utils["[ANALYSIS] utils.py"]
+  end
+  subgraph analysis_bottom[" "]
+    direction LR
+    trainer["[ANALYSIS] trainer.py"] --> evaluation["[ANALYSIS] evaluation.py"] --> main["[ANALYSIS] main.py"] --> output[Analyzed module specifications]
+  end
+  utils --> trainer
   analysis_usage["LLM: o3-mini<br/>Input: 7,521 | Cached: 194,304<br/>Output: 30,295 | Cost: $0.24843830"]
   main -. usage .-> analysis_usage
 ```
@@ -99,9 +113,16 @@ flowchart LR
 ### 4. Coding
 
 ```mermaid
-flowchart LR
-  input[Analyzed module specifications] --> cfg["[CODING] config.py"] --> loader["[CODING] dataset_loader.py"] --> model["[CODING] model.py"] --> utils["[CODING] utils.py"] --> trainer["[CODING] trainer.py"] --> evaluation["[CODING] evaluation.py"] --> main["[CODING] main.py"]
-  main --> generated[Generated source: Paper2Code/outputs/ple-paper_repo] --> implementation[paper2code-ple/ple-paper_repo]
+flowchart TB
+  subgraph coding_top[" "]
+    direction LR
+    input[Analyzed module specifications] --> cfg["[CODING] config.py"] --> loader["[CODING] dataset_loader.py"] --> model["[CODING] model.py"] --> utils["[CODING] utils.py"]
+  end
+  subgraph coding_bottom[" "]
+    direction LR
+    trainer["[CODING] trainer.py"] --> evaluation["[CODING] evaluation.py"] --> main["[CODING] main.py"] --> generated[Generated source: Paper2Code/outputs/ple-paper_repo] --> implementation[paper2code-ple/ple-paper_repo]
+  end
+  utils --> trainer
   coding_usage["LLM: o3-mini<br/>Input: 37,235 | Cached: 221,312<br/>Output: 49,610 | Cost: $0.38096410"]
   main -. usage .-> coding_usage
   total_usage["Run total: o3-mini<br/>Input: 51,662 | Cached: 517,120<br/>Output: 93,188<br/>Accumulated cost: $0.75127140"]
@@ -111,8 +132,16 @@ flowchart LR
 ### 5. Run the generated implementation
 
 ```mermaid
-flowchart LR
-  implementation[paper2code-ple/ple-paper_repo] --> run[Run: python main.py] --> data[Load configured dataset] --> preprocess[Preprocess and split data] --> build[Build embeddings and model] --> train[Train configured runs] --> evaluate[Evaluate validation and test sets] --> output[Report metrics and save best_model.pt]
+flowchart TB
+  subgraph runtime_top[" "]
+    direction LR
+    implementation[paper2code-ple/ple-paper_repo] --> run[Run: python main.py] --> data[Load configured dataset] --> preprocess[Preprocess and split data]
+  end
+  subgraph runtime_bottom[" "]
+    direction LR
+    build[Build embeddings and model] --> train[Train configured runs] --> evaluate[Evaluate validation and test sets] --> output[Report metrics and save best_model.pt]
+  end
+  preprocess --> build
 ```
 
 ## Configure another dataset
