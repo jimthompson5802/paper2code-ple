@@ -82,7 +82,9 @@ flowchart TB
   pdf --> grobid
   convert --> json
   classDef transition fill:#fff2cc,stroke:#b8860b,stroke-width:3px,color:#222,font-weight:bold
+  classDef source fill:#dbeafe,stroke:#2563eb,stroke-width:3px,color:#1e3a8a,font-weight:bold
   class json transition
+  class pdf source
 ```
 
 ### 2. Paper2Code: Planning
