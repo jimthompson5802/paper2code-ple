@@ -65,6 +65,83 @@ python main.py
 
 The experiment trains the number of models configured by `evaluation.num_seeds`, reports validation and test metrics, and writes the best model checkpoint as `best_model.pt` in the current working directory. Training can take some time with multiple seeds and up to `training.max_epochs` epochs. For a shorter development run, reduce those configuration values in `ple-paper_repo/config.yaml`.
 
+## End-to-end paper-to-code workflow
+
+The diagram below shows how a paper PDF is converted to structured JSON, processed by the Paper2Code agents on the `ple-paper` branch, and used to generate and run the implementation in this repository. The planning, analysis, and coding stage names follow [Paper2Code's run log](https://github.com/jimthompson5802/Paper2Code/blob/ple-paper/outputs/ple-paper_run_log.txt). Script steps are shown separately from agent stages.
+
+```mermaid
+flowchart TD
+  pdf[Academic paper PDF]
+
+  subgraph converter["s2orc-doc2json"]
+    grobid["Grobid parses PDF into TEI XML"]
+    s2json["Convert TEI XML to S2ORC JSON"]
+    grobid --> s2json
+  end
+
+  pdf --> grobid
+  s2json --> json["Structured paper JSON"]
+
+  subgraph papercoder["Paper2Code on branch ple-paper"]
+    clean["Script: codes/0_pdf_process.py<br/>Clean paper JSON"]
+
+    subgraph planning["Planning agents"]
+      plan["[Planning] Overall plan"]
+      architecture["[Planning] Architecture design"]
+      logic["[Planning] Logic design"]
+      config["[Planning] Configuration file generation"]
+      plan --> architecture --> logic --> config
+    end
+
+    extract["Script: codes/1.1_extract_config.py<br/>Extract configuration and planning artifacts"]
+
+    subgraph analysis["Analysis agents"]
+      a_config["[ANALYSIS] config.py"]
+      a_loader["[ANALYSIS] dataset_loader.py"]
+      a_model["[ANALYSIS] model.py"]
+      a_utils["[ANALYSIS] utils.py"]
+      a_trainer["[ANALYSIS] trainer.py"]
+      a_eval["[ANALYSIS] evaluation.py"]
+      a_main["[ANALYSIS] main.py"]
+      a_config --> a_loader --> a_model --> a_utils --> a_trainer --> a_eval --> a_main
+    end
+
+    subgraph coding["Coding agents"]
+      c_config["[CODING] config.py"]
+      c_loader["[CODING] dataset_loader.py"]
+      c_model["[CODING] model.py"]
+      c_utils["[CODING] utils.py"]
+      c_trainer["[CODING] trainer.py"]
+      c_eval["[CODING] evaluation.py"]
+      c_main["[CODING] main.py"]
+      c_config --> c_loader --> c_model --> c_utils --> c_trainer --> c_eval --> c_main
+    end
+
+    generated["Generated source repository<br/>Paper2Code/outputs/ple-paper_repo"]
+
+    clean --> plan
+    config --> extract --> a_config
+    a_main --> c_config
+    c_main --> generated
+  end
+
+  json --> clean
+  generated -->|"Use generated implementation here"| implementation["paper2code-ple/ple-paper_repo"]
+
+  subgraph runtime["Run the generated implementation"]
+    run["Run: python main.py"]
+    load["Load configuration and dataset CSV"]
+    prepare["Preprocess and split data"]
+    build["Build feature embeddings and model"]
+    train["Train models with validation and early stopping"]
+    evaluate["Evaluate validation and test data; aggregate ensemble results"]
+    results["Report metrics and save best_model.pt"]
+    run --> load --> prepare --> build --> train --> evaluate --> results
+  end
+
+  implementation --> run
+```
+
 ## Configure another dataset
 
 Edit the `training` section of `ple-paper_repo/config.yaml`:
