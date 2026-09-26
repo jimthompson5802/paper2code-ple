@@ -113,7 +113,7 @@ flowchart TB
 ```mermaid
 flowchart TB
   input[Planning artifacts and configuration]
-  subgraph analysis["Analysis"]
+  subgraph analysis["Derive System Specifications"]
     cfg["[ANALYSIS] config.py"] --> loader["[ANALYSIS] dataset_loader.py"] --> model["[ANALYSIS] model.py"] --> utils["[ANALYSIS] utils.py"]
     trainer["[ANALYSIS] trainer.py"] --> evaluation["[ANALYSIS] evaluation.py"] --> main["[ANALYSIS] main.py"]
     utils --> trainer
@@ -133,7 +133,7 @@ flowchart TB
 ```mermaid
 flowchart TB
   input[Analyzed module specifications]
-  subgraph coding["Coding"]
+  subgraph coding["Generate Source Code"]
     cfg["[CODING] config.py"] --> loader["[CODING] dataset_loader.py"] --> model["[CODING] model.py"] --> utils["[CODING] utils.py"]
     direction LR
     trainer["[CODING] trainer.py"] --> evaluation["[CODING] evaluation.py"] --> main["[CODING] main.py"] --> generated[Generated source: Paper2Code/outputs/ple-paper_repo]
