@@ -74,6 +74,8 @@ These five diagrams split the paper-to-code process into slide-sized stages. Eac
 ```mermaid
 flowchart LR
   pdf[Academic paper PDF] --> grobid[Grobid parses PDF] --> tei[TEI XML] --> convert[s2orc-doc2json converts TEI to S2ORC JSON] --> json[Structured paper JSON]
+  classDef transition fill:#fff2cc,stroke:#b8860b,stroke-width:3px,color:#222,font-weight:bold
+  class json transition
 ```
 
 ### 2. Planning
@@ -91,6 +93,8 @@ flowchart TB
   json --> clean
   architecture --> logic
   extract --> output
+  classDef transition fill:#fff2cc,stroke:#b8860b,stroke-width:3px,color:#222,font-weight:bold
+  class json,output transition
   planning_usage["LLM: o3-mini<br/>Input: 6,906 | Cached: 101,504<br/>Output: 13,283 | Cost: $0.12186900"]
   planning -. usage .-> planning_usage
 ```
@@ -109,6 +113,8 @@ flowchart TB
 
   input --> cfg
   main --> output
+  classDef transition fill:#fff2cc,stroke:#b8860b,stroke-width:3px,color:#222,font-weight:bold
+  class input,output transition
   analysis_usage["LLM: o3-mini<br/>Input: 7,521 | Cached: 194,304<br/>Output: 30,295 | Cost: $0.24843830"]
   analysis -. usage .-> analysis_usage
 ```
@@ -128,6 +134,8 @@ flowchart TB
 
   input --> cfg
   generated --> implementation
+  classDef transition fill:#fff2cc,stroke:#b8860b,stroke-width:3px,color:#222,font-weight:bold
+  class input,implementation transition
   coding_usage["LLM: o3-mini<br/>Input: 37,235 | Cached: 221,312<br/>Output: 49,610 | Cost: $0.38096410"]
   coding -. usage .-> coding_usage
 ```
@@ -154,6 +162,8 @@ flowchart TB
   end
 
   implementation --> run
+  classDef transition fill:#fff2cc,stroke:#b8860b,stroke-width:3px,color:#222,font-weight:bold
+  class implementation transition
 ```
 
 ## Configure another dataset
