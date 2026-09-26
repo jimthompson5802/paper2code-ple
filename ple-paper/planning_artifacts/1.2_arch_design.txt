@@ -1,0 +1,109 @@
+----------------------------------------
+[Implementation approach]
+We will implement a modular Python system using PyTorch for the deep learning backend, scikit-learn for data preprocessing (e.g., quantile transformation and train/test splits), and Optuna for hyperparameter tuning. The system will support multiple embedding modules (Piecewise Linear Embedding, Periodic Embedding, and a conventional linear embedding) which feed into backbone models (MLP, ResNet, and Transformer). Each module is encapsulated into its own file and class. The design is simple and configurable via a central configuration dictionary, allowing users to switch embedding modules and backbones, set hyperparameters, and log training progress. The system will also include data loaders, training loops with early stopping, and evaluation routines for computing metrics and ensemble results.
+
+----------------------------------------
+[File list]
+- main.py
+- dataset_loader.py
+- model.py
+- trainer.py
+- evaluation.py
+
+----------------------------------------
+[Data structures and interfaces]
+classDiagram
+    class Main {
+        +__init__(config: dict)
+        +run_experiment() -> None
+    }
+    class DatasetLoader {
+        +__init__(config: dict)
+        +load_data() -> Tuple[Any, Any, Any]  // (train_loader, valid_loader, test_loader)
+    }
+    class EmbeddingModule {
+        <<abstract>>
+        +__init__(params: dict)
+        +forward(x: Tensor) -> Tensor
+    }
+    class PiecewiseLinearEmbedding {
+        +__init__(params: dict)
+        +compute_bins(data: Tensor) -> List[float]
+        +forward(x: Tensor) -> Tensor
+    }
+    class PeriodicEmbedding {
+        +__init__(params: dict)
+        +forward(x: Tensor) -> Tensor
+    }
+    class LinearEmbedding {
+        +__init__(params: dict)
+        +forward(x: Tensor) -> Tensor
+    }
+    class Backbone {
+        <<abstract>>
+        +__init__(config: dict)
+        +forward(x: Tensor) -> Tensor
+    }
+    class MLP {
+        +__init__(config: dict)
+        +forward(x: Tensor) -> Tensor
+    }
+    class ResNet {
+        +__init__(config: dict)
+        +forward(x: Tensor) -> Tensor
+    }
+    class TransformerModel {
+        +__init__(config: dict)
+        +forward(x: Tensor) -> Tensor
+    }
+    class Model {
+        +__init__(params: dict) 
+        +forward(x: Tensor) -> Tensor
+    }
+    Model o-- EmbeddingModule : uses
+    Model o-- Backbone : uses
+    class Trainer {
+        +__init__(model: Model, train_loader: Any, valid_loader: Any, config: dict)
+        +train() -> Model
+    }
+    class Evaluation {
+        +__init__(model: Model, test_loader: Any, config: dict)
+        +evaluate() -> dict
+    }
+    Main --> DatasetLoader
+    Main --> Model
+    Main --> Trainer
+    Main --> Evaluation
+    Trainer --> Model
+    Evaluation --> Model
+
+
+----------------------------------------
+[Program call flow]
+sequenceDiagram
+    participant M as Main
+    participant DL as DatasetLoader
+    participant MD as Model
+    participant TR as Trainer
+    participant EV as Evaluation
+
+    M->>DL: __init__(config) & load_data()
+    DL-->>M: (train_loader, valid_loader, test_loader)
+    M->>MD: __init__(params) to build embedding and backbone
+    M->>TR: __init__(model, train_loader, valid_loader, config)
+    TR->>MD: Call forward(x) for each batch during training
+    TR-->>M: Return best trained model (after early stopping)
+    M->>EV: __init__(best_model, test_loader, config)
+    EV->>MD: Call forward(x) for test batches
+    MD-->>EV: Return predictions
+    EV-->>M: Return evaluation metrics (e.g., RMSE or Accuracy)
+
+
+----------------------------------------
+[Anything UNCLEAR]
+Clarification is needed on the following details: 
+ - The precise PLE interpolation formula especially the boundary conditions (x < b0 and x ≥ bT) for each feature.
+ - The detailed hyperparameter distributions (e.g., σ and k for periodic embeddings, decision tree parameters for target-aware PLE).
+ - The exact dataset preprocessing steps (batch sizes, specific quantile transformation parameters) required for each dataset as reported in the paper.
+ - Any additional logging or checkpointing requirements.
+

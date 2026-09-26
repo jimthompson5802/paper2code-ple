@@ -1,0 +1,105 @@
+Below is a detailed analysis of the Evaluation module’s logic (evaluation.py). This document describes the step‐by‐step process that the Evaluation class will follow to compute the final performance metrics (RMSE for regression or accuracy for classification) and, when multiple runs are available, to combine predictions by forming ensembles (as described in the paper). Use this analysis as guidelines when writing the code.
+
+─────────────────────────────  
+1. Initialization and Inputs
+
+• The Evaluation class’s constructor ( __init__ ) will accept three main inputs:
+ – model: This can be either a single Model instance or a list of Model instances (e.g. 15 independent trained models from different random seeds). When a list is passed, the module should support ensemble evaluation.
+ – test_loader: A PyTorch DataLoader that iterates over the test set. Each batch should return a tuple (inputs, targets). The loader must have been prepared by the DatasetLoader module, which already applied the quantile transformation (or other preprocessing) as defined in config.
+ – config: A configuration dictionary (loaded from config.yaml) that may later be used to decide options (for example, the number of runs, and if any task‐specific parameters are provided).
+
+• Since the Evaluation class does not (and should not) change any design expectations, it will simply store these parameters for use in the evaluate() method.
+
+─────────────────────────────  
+2. The evaluate() Method – Core Logic
+
+A. Prepare for Evaluation  
+ • First, set the model (or each model in the provided list) into evaluation mode by calling .eval().  
+ • Use torch.no_grad() to ensure no gradients are computed during the forward passes.
+
+B. Iterate Over the Test Set  
+ • For each batch from the test_loader, extract the input features (x) and the ground truth labels (y).  
+ • Depending on whether a single model or multiple models are provided:
+  – Single Model: Run a forward pass on x using model.forward(x) to obtain predictions.
+  – Ensemble Case (list of models): For each model in the list, run forward(x) for the same batch. Store each model’s predictions for later ensemble aggregation.
+ • Append the predictions and the corresponding ground truth for each batch in separate lists. (Make sure that the predictions are moved to CPU if necessary and concatenated correctly.)
+
+C. Post-Processing Predictions  
+ • After all batches have been processed, concatenate the predictions and ground truth into single tensors or arrays.
+ • Determine the problem type (regression or classification). For example:
+  – Regression: Typically the prediction tensor has one output per sample (or is a float tensor), and the ground truth is continuous.
+  – Classification: Either the predictions have more than one dimension (in which case use argmax over the class dimension) or for binary classification a threshold (e.g., 0.5) is applied.
+  Note: Although the configuration file does not explicitly list “task” information, you may infer the task by checking the output dimensionality or target type.
+
+D. Computing the Metric  
+ 1. Regression (RMSE)  
+  – Compute the squared error on each sample: (prediction – target)².
+  – Average the squared errors over all samples.
+  – Take the square root of the mean squared error to get the RMSE.
+ 2. Classification (Accuracy)  
+  – For multi-class classification, convert the raw predictions by taking the argmax on the class dimension.
+  – For binary classification, you can use a threshold (e.g., 0.5) if the prediction is a single scalar per sample.
+  – Compare the resultant predicted labels with the ground truth labels.
+  – Compute accuracy as (# correct predictions) / (total # samples).
+
+─────────────────────────────  
+3. Ensemble Evaluation Logic
+
+When multiple models (runs) are provided (typically 15, as specified in config under training:num_runs), the Evaluation class should support forming ensembles:
+
+A. Collect Predictions from Each Individual Model  
+ • Either process each model over the entire test set and store its predictions separately, or if the forward pass was done in parallel, maintain separate prediction lists for each model.
+
+B. Grouping for Ensembles  
+ • According to the paper, the 15 runs should be partitioned into three disjoint groups of equal size (i.e., 5 models per group).  
+ • For each of the three groups, average the predictions for each sample.  
+  – For regression, this entails a simple arithmetic mean.
+  – For classification, if using probability outputs (or logits converted to probabilities), average the prediction vectors then pick the class with the highest probability. (If models output hard labels, then an alternative is to perform majority voting; however, the paper describes averaging as the ensemble technique.)
+ • Optionally, you can also compute an overall ensemble by averaging all 15 model predictions.
+
+C. Compute Metrics for Ensembles  
+ • For each ensemble group, compute the metric (RMSE or accuracy) following the same procedure as for a single model.  
+ • Also report the mean and standard deviation across these ensemble groups to capture variability.
+
+─────────────────────────────  
+4. Returning Output
+
+• The evaluate() method should return a dictionary that contains at least the following:
+ – “individual_metrics”: a list (or dictionary) of metrics for each individual run.
+ – “ensemble_group_metrics”: a dictionary for the three ensemble groups with their computed metric values.
+ – Optionally, “overall_ensemble_metric”: the metric computed by averaging predictions from all models.
+ – This dictionary is intended for logging and later comparison with benchmark numbers reported in the paper.
+
+─────────────────────────────  
+5. Integration with the Rest of the System
+
+• The Evaluation module will be invoked after training (see main.py’s program call flow).  
+• It depends on the Model outputs from trainer.py and uses the same configuration settings (such as batch_size from config.data and experiment.num_runs from config.experiment) for consistent logging.
+• Make sure that any predicted outputs and ground-truth labels are in the proper format and that any device transfers (GPU->CPU) are handled correctly.
+
+─────────────────────────────  
+6. Edge Cases and Clarifications
+
+• Boundary Conditions for Prediction  
+ – Although most of the “trickiness” regarding boundary behavior arises in the embedding module (for example, handling x < b₀ or x ≥ b_T in the PLE), the evaluation module must assume that the model’s forward method returns correct predictions.
+
+• Data Type and Shape Check  
+ – Validate that the predictions and ground truth are of compatible sizes and data types (e.g., both on CPU and with the same shape) before metric computation.
+ – If predictions are logits (classification) then ensure any necessary conversion (e.g., softmax and argmax) is applied.
+
+• Device Management  
+ – Use torch.no_grad() and ensure that intermediate tensors are brought to CPU for numpy-based metric calculations if desired.
+
+─────────────────────────────  
+7. Summary of the Evaluation Flow
+
+1. __init__(model, test_loader, config) stores the model(s), test data, and config.
+2. The evaluate() function:  
+ – Sets the model(s) to evaluation mode and disables gradient computation.
+ – Iterates over test_loader, obtaining predictions and corresponding targets.
+ – Concatenates per-batch values into complete prediction and ground truth tensors.
+ – Determines whether to compute RMSE (regression) or accuracy (classification) based on the shape or type of predictions/targets.
+ – If a list of models is provided, groups the predictions into three ensembles (each containing 5 models) and computes ensemble metrics.
+3. Returns a dictionary with individual and/or ensemble metrics.
+
+By following this detailed logic, the Evaluation class in evaluation.py will correctly compute the required metrics and aggregate ensemble predictions as described in the paper. This ensures that experimental results are computed in a reproducible, modular, and consistent way with the provided design and configuration.

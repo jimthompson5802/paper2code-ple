@@ -1,0 +1,208 @@
+"""
+trainer.py
+
+This module defines the Trainer class that manages the training process for our deep learning model.
+The Trainer is responsible for:
+  - Initializing the optimizer (AdamW) and loss function (MSELoss for regression or CrossEntropyLoss for classification)
+    based on the target data.
+  - Running the training loop with early stopping based on a validation metric.
+  - Logging training and validation metrics per epoch.
+  - Returning the best model (based on validation performance).
+
+The Trainer class follows the design and configuration specified in the project, using the configuration
+settings from config.yaml.
+"""
+
+import time
+from typing import Any, Dict
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch import Tensor
+from torch.utils.data import DataLoader
+
+
+class Trainer:
+    """
+    Trainer manages training and validation of a model over a number of epochs with early stopping.
+    
+    Attributes:
+        model (nn.Module): The deep learning model (including both embedding modules and backbone).
+        train_loader (DataLoader): DataLoader for training data.
+        valid_loader (DataLoader): DataLoader for validation data.
+        config (dict): Configuration dictionary with training settings.
+        device (torch.device): Device on which the model and data are placed.
+        optimizer (Optimizer): Optimizer for updating the model parameters.
+        early_stopping_patience (int): Number of epochs with no improvement before stopping training.
+        max_epochs (int): Maximum number of epochs to run as a safety gauge.
+        is_regression (bool): Flag indicating whether the task is regression (True) or classification (False).
+        criterion (nn.Module): Loss function (MSELoss for regression, CrossEntropyLoss for classification).
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        train_loader: DataLoader,
+        valid_loader: DataLoader,
+        config: Dict[str, Any],
+    ) -> None:
+        """
+        Initializes the Trainer.
+
+        Args:
+            model (nn.Module): The model to be trained.
+            train_loader (DataLoader): DataLoader for training batches.
+            valid_loader (DataLoader): DataLoader for validation batches.
+            config (Dict[str, Any]): Configuration dictionary containing training hyperparameters.
+        """
+        self.model: nn.Module = model
+        self.train_loader: DataLoader = train_loader
+        self.valid_loader: DataLoader = valid_loader
+        self.config: Dict[str, Any] = config
+
+        # Determine device and place model on it.
+        self.device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+
+        # Read optimizer settings from config.
+        optimizer_type: str = self.config.get("training", {}).get("optimizer", "AdamW")
+        learning_rate: float = self.config.get("training", {}).get("learning_rate", 1e-3)
+        if optimizer_type == "AdamW":
+            self.optimizer = optim.AdamW(self.model.parameters(), lr=learning_rate)
+        else:
+            # Default to AdamW if unknown optimizer type.
+            self.optimizer = optim.AdamW(self.model.parameters(), lr=learning_rate)
+
+        # Early stopping and epoch settings.
+        self.early_stopping_patience: int = self.config.get("training", {}).get("early_stopping_patience", 16)
+        self.max_epochs: int = self.config.get("training", {}).get("max_epochs", 100)
+
+        # Determine the task type (regression or classification) using a sample batch from train_loader.
+        self.model.train()
+        try:
+            sample_batch = next(iter(self.train_loader))
+        except StopIteration:
+            raise ValueError("Training loader is empty; cannot determine task type.")
+        _, sample_targets = sample_batch
+        sample_targets = sample_targets.to(self.device)
+        # If sample_targets are of type float then we assume regression; if integer, classification.
+        if sample_targets.dtype in (torch.float32, torch.float64):
+            self.is_regression: bool = True
+            self.criterion = nn.MSELoss()
+        else:
+            self.is_regression = False
+            self.criterion = nn.CrossEntropyLoss()
+
+    def train(self) -> nn.Module:
+        """
+        Runs the training loop, performs validation after each epoch, applies early stopping,
+        and finally loads the best model state before returning the model.
+
+        Returns:
+            nn.Module: The best trained model.
+        """
+        # Initialize best metric and counters.
+        best_metric: float = float('inf') if self.is_regression else 0.0
+        best_epoch: int = 0
+        best_model_state: Dict[str, Any] = None
+        no_improvement_count: int = 0
+
+        print("Starting training ...")
+        # Training epochs.
+        for epoch in range(1, self.max_epochs + 1):
+            self.model.train()
+            running_loss: float = 0.0
+            train_batches: int = 0
+            epoch_start_time: float = time.time()
+
+            for batch in self.train_loader:
+                inputs, targets = batch
+                inputs = inputs.to(self.device)
+                targets = targets.to(self.device)
+
+                self.optimizer.zero_grad()
+                outputs: Tensor = self.model(inputs)
+                loss: Tensor = self.criterion(outputs, targets)
+                loss.backward()
+                self.optimizer.step()
+
+                running_loss += loss.item()
+                train_batches += 1
+
+            avg_train_loss: float = running_loss / train_batches if train_batches > 0 else 0.0
+            epoch_training_time: float = time.time() - epoch_start_time
+
+            # Validation phase.
+            self.model.eval()
+            valid_loss: float = 0.0
+            valid_batches: int = 0
+            correct_predictions: int = 0
+            total_samples: int = 0
+
+            with torch.no_grad():
+                for batch in self.valid_loader:
+                    inputs, targets = batch
+                    inputs = inputs.to(self.device)
+                    targets = targets.to(self.device)
+
+                    outputs = self.model(inputs)
+                    loss = self.criterion(outputs, targets)
+                    valid_loss += loss.item()
+                    valid_batches += 1
+
+                    if not self.is_regression:
+                        # For classification: compute accuracy.
+                        # Expecting outputs shape: [batch_size, num_classes]. If shape indicates single output, treat as binary.
+                        if outputs.dim() == 1 or outputs.size(1) == 1:
+                            predicted = (outputs > 0.5).long().squeeze()
+                        else:
+                            _, predicted = torch.max(outputs, dim=1)
+                        correct_predictions += (predicted == targets).sum().item()
+                        total_samples += targets.size(0)
+
+            avg_valid_loss: float = valid_loss / valid_batches if valid_batches > 0 else 0.0
+
+            # Compute validation metric.
+            if self.is_regression:
+                # RMSE metric.
+                current_metric: float = avg_valid_loss ** 0.5
+                metric_name: str = "RMSE"
+                improvement: bool = current_metric < best_metric
+            else:
+                # Accuracy metric.
+                current_metric = correct_predictions / total_samples if total_samples > 0 else 0.0
+                metric_name = "Accuracy"
+                improvement: bool = current_metric > best_metric
+
+            # Early stopping and checkpointing.
+            if improvement:
+                best_metric = current_metric
+                best_epoch = epoch
+                best_model_state = self.model.state_dict()
+                no_improvement_count = 0
+            else:
+                no_improvement_count += 1
+
+            # Logging the epoch progress.
+            print(
+                f"Epoch [{epoch}/{self.max_epochs}] - "
+                f"Train Loss: {avg_train_loss:.4f}, "
+                f"Valid Loss: {avg_valid_loss:.4f}, "
+                f"{metric_name}: {current_metric:.4f}, "
+                f"Time: {epoch_training_time:.2f}s, "
+                f"No Improvement: {no_improvement_count}"
+            )
+
+            # Check if early stopping condition met.
+            if no_improvement_count >= self.early_stopping_patience:
+                print("Early stopping triggered.")
+                break
+
+        # Load the best model state if available.
+        if best_model_state is not None:
+            self.model.load_state_dict(best_model_state)
+            print(f"Training complete. Best epoch: {best_epoch} with {metric_name}: {best_metric:.4f}")
+        else:
+            print("No improvement observed during training; returning final model state.")
+        return self.model

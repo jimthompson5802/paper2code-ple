@@ -1,0 +1,29 @@
+## config.yaml
+training:
+  optimizer: "AdamW"
+  learning_rate: 1e-3  # Default value; no learning rate schedule as per paper.
+  batch_size: 128      # Predefined per dataset (see Appendix C)
+  early_stopping_patience: 16
+  max_epochs: 100      # Maximum epochs set as a safeguard; training stops based on early stopping.
+  num_runs: 15         # Number of experiments with different random seeds.
+model:
+  backbone:
+    type: "MLP"        # Options: MLP, ResNet, Transformer. Default MLP has 4 layers of size 256.
+    mlp_layers: 4
+    mlp_hidden_size: 256
+  embedding:
+    type: "PLE_q"      # Options: LR, PLE_q (quantile-based), PLE_t (target-aware), Periodic.
+data:
+  preprocessing: "quantile"   # Use quantile transformation for all datasets except Otto Group.
+  quantile_bins: 256          # Number of bins for quantile-based PLE (tuned between 2 and 256)
+  target_aware_params:
+    max_leaves: 256           # Maximum leaves for target-aware binning (tuned between 2 and 256)
+    min_items_per_leaf: 1     # Minimum items per leaf (tuned between 1 and 128)
+    min_info_gain: 1e-9        # Minimum information gain required for a split (tuned in [1e-9, 0.01])
+embedding:
+  periodic:
+    k_range: [1, 128]         # Tuning range for periodic embedding parameter k (UniformInt between 1 and 128)
+    sigma: 0.1                # Initial sigma for periodic embedding; important hyperparameter to tune
+experiment:
+  random_seed: 42
+  use_optuna: true          # Use Optuna for hyperparameter tuning as described in the paper.

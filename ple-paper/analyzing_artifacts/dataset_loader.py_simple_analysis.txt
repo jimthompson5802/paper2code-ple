@@ -1,0 +1,101 @@
+Below is a detailed logic analysis for the dataset_loader.py module. This analysis explains step‐by‐step how the DatasetLoader class should work, what functions it must provide, and how it uses configuration values (from config.yaml) and standard libraries (pandas, scikit-learn, torch) to load, preprocess, split, and package the data into DataLoader objects.
+
+─────────────────────────────  
+1. Overview and Class Initialization
+
+• The DatasetLoader class will be initialized with a configuration dictionary (config). This configuration includes keys for data preprocessing (e.g., "data.preprocessing" should be "quantile"), the number of quantile bins (config["data"]["quantile_bins"]), and experiment settings such as the random seed (config["experiment"]["random_seed"]).
+
+• In the __init__ method, the loader should store the config, set any required random seeds (for reproducibility), and potentially read additional parameters (like file paths for the raw dataset). Although file paths are not explicitly provided in config.yaml, the design assumes that either they are part of the config or passed in as arguments to load_data().
+
+─────────────────────────────  
+2. Loading the Raw Dataset
+
+• Read the raw dataset using pandas (e.g., using pd.read_csv).  
+  – The file path can be passed through the configuration (or as a direct argument to load_data()).  
+• Determine the schema:  
+  – Identify numerical features and categorical features (if any).  
+  – For numeric features, the later embedding modules (such as PLE or Periodic) expect raw scalar inputs.  
+  – For categorical features (if present), apply one-hot encoding later (this is not central here, but you can include optional logic).
+
+• Handle missing values if necessary (e.g., by dropping rows or imputing), although the paper does not specify the exact policy.
+
+─────────────────────────────  
+3. Data Preprocessing
+
+A. Numerical Feature Preprocessing  
+ • According to the plan and config.yaml, use “quantile” preprocessing for numerical features (except for Otto Group, though we assume that the default is quantile for all datasets per our configuration).  
+ • Use scikit-learn’s quantile_transform to transform the numerical features:
+  – The quantile_transform standardizes the distribution, mapping data into [0, 1].
+  – The number of quantiles (or bins) is set by config["data"]["quantile_bins"] (default is 256).  
+ • This transformation is applied only on the training set; then, you must use the same transformation (via the fitted transformer) on validation and test sets.
+
+B. Target Preprocessing  
+ • For regression problems (as mentioned in the paper), standardize (or scale) the target variable.  
+ • The DatasetLoader should detect from the dataset (or from extra config information) whether the task is regression or classification and apply standardization on the target accordingly.
+
+C. Categorical Feature Preprocessing (if applicable)  
+ • Apply one-hot encoding for categorical columns (using pandas get_dummies or scikit-learn’s OneHotEncoder) once the numerical columns have been separated.
+ • Note that for CatBoost (used as a baseline in other modules) the categorical features are handled internally. For all other DL models, one-hot encoding is appropriate.
+
+─────────────────────────────  
+4. Splitting the Data
+
+• The paper requires the dataset to be split into three disjoint sets: training, validation, and test.  
+• A common approach is to first split into (train+validation) and test, and then split the (train+validation) group further into training and validation sets.  
+• The proportions are not fully specified in the paper; you may choose standard splits (for example, 70% training, 15% validation, 15% test) or allow configuration to override the proportions.  
+• Use scikit-learn’s train_test_split, and set the random_state to config["experiment"]["random_seed"] to ensure reproducibility.
+
+─────────────────────────────  
+5. Creating PyTorch DataLoader Objects
+
+• Convert the preprocessed features and targets into PyTorch tensors.  
+  – Use torch.tensor with an appropriate dtype (e.g., torch.float32 for features).
+• After converting, encapsulate each split (training, validation, test) into a TensorDataset.  
+• Wrap each TensorDataset using torch.utils.data.DataLoader, with the batch size as specified in config["training"]["batch_size"] (default value 128).
+  – For the training DataLoader, set shuffle=True.
+  – For validation and test loaders, shuffling is not required.
+• Return the DataLoader objects as a tuple: (train_loader, valid_loader, test_loader).
+
+─────────────────────────────  
+6. Additional Considerations and Edge-Cases
+
+• Check and enforce that the quantile transformation is fitted only on the training data. Then, “transform” the validation and test inputs using the same transformer parameters.  
+• If target standardization is applied, likewise fit on the training targets and use those parameters to transform the validation and test targets.
+• For datasets that mix feature types (numerical and categorical), keep track of feature indices or maintain separate tensors. This later ensures that embedding modules in model.py receive only the numerical (or correctly preprocessed) inputs.
+• Log or print dataset shapes (number of samples, features) and other summary statistics to help with debugging and ensuring that the splits are done correctly.
+• Ensure that any configuration parameters (such as the number of quantile bins) are referenced directly from the config dictionary so that no values are assumed.
+
+─────────────────────────────  
+7. Summary of the Workflow in dataset_loader.py
+
+1. __init__(config: dict):  
+  – Save the config and set the experiment random seed.  
+  – Optionally load file path(s) from the config.
+
+2. load_data() method:  
+  a. Load the raw dataset using pandas.  
+  b. Separate features into numerical (and categorical if present).  
+  c. If config['data']['preprocessing'] is set to "quantile", fit a quantile_transform on the training numerical features (using the "quantile_bins" parameter).  
+  d. Standardize/regulate the target variable for regression tasks.  
+  e. Split the dataset into training, validation, and test sets (using train_test_split and fixed proportions / random_state).  
+  f. Convert the datasets into PyTorch tensors and wrap them into TensorDataset objects.  
+  g. Create and return DataLoader objects for each split using the batch size from config["training"]["batch_size"].
+
+3. Return the (train_loader, valid_loader, test_loader) tuple.
+
+─────────────────────────────  
+8. Integration with Other Modules
+
+• The output of DatasetLoader (the three DataLoader objects) is consumed by the Trainer class (in trainer.py) during the training loop.  
+• The preprocessing ensures that all numerical inputs are in the proper range (typically [0, 1]) which is especially important for embedding modules such as the Piecewise Linear Embedding (PLE).  
+• Ensure that the same preprocessor (especially the quantile transformer) can be saved/persisted if needed so that the same transformation is applied at inference time.
+
+─────────────────────────────  
+Conclusion
+
+This logic analysis outlines the entire processing flow required in the dataset_loader.py module. It emphasizes:
+ – Using the configuration parameters strictly (batch size, quantile_bins, random seed, preprocessing type).  
+ – Ensuring reproducibility via fixed random states.  
+ – Separately handling numerical (and possibly categorical) features with the quantile transformation per the paper’s description.  
+ – Splitting the data into three sets and wrapping them with PyTorch DataLoader objects.
+These detailed steps guarantee that the dataset preparation aligns with the experiment’s requirements and will work seamlessly with the subsequent modules (model, trainer, evaluation) in the system.

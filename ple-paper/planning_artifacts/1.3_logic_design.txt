@@ -1,0 +1,43 @@
+----------------------------------------
+[Required packages]
+- numpy==1.21.0
+- torch==1.9.0
+- scikit-learn==0.24.2
+- optuna==2.10.0
+- pandas==1.3.0
+
+----------------------------------------
+[Required Other language third-party packages]
+- No third-party dependencies required
+
+----------------------------------------
+[Logic Analysis]
+- ['dataset_loader.py', 'Defines the DatasetLoader class that loads raw datasets (e.g., CSV files or other formats), applies necessary preprocessing (quantile transformation, standardization), splits the data into training, validation, and test sets, and creates PyTorch DataLoader objects. It relies on scikit-learn for preprocessing and train_test_split, pandas/numpy for data manipulation.']
+- ['model.py', 'Contains the definitions of all model components:\n- Embedding modules: An abstract EmbeddingModule class and its implementations:\n  • PiecewiseLinearEmbedding: Implements the PLE by computing bin boundaries (both quantile-based and target-aware) and performing piecewise linear interpolation. Handles boundary conditions as described in the paper.\n  • PeriodicEmbedding: Applies a periodic function (e.g., sin(k*x + c)) with trainable parameters (offsets and scaling factors) to the numerical features.\n  • LinearEmbedding: A traditional linear layer based embedding for numerical features.\n- Backbone models: Implements different architectures such as MLP, ResNet, and TransformerModel. These classes accept preprocessed feature embeddings and perform forward propagation.\n- Model wrapper: Combines the chosen EmbeddingModule with the selected Backbone to form the final model. Dependencies include PyTorch.']
+- ['trainer.py', 'Defines the Trainer class that manages the training process. Responsibilities include:\n- Initializing the optimizer (AdamW) and loss functions (MSE for regression, cross-entropy for classification).\n- Executing the training loop with support for early stopping (patience = 16 epochs).\n- Running experiments with multiple random seeds (15 runs per configuration) and logging training/validation metrics.\n- Saving the best model based on validation performance.\nDepends on model.py and dataset_loader.py.']
+- ['evaluation.py', 'Implements the Evaluation class that computes performance metrics:\n- For regression problems: RMSE\n- For classification problems: Accuracy\nAlso handles ensemble evaluation by aggregating predictions from multiple trained models. Depends on the Trainer and model outputs.']
+- ['main.py', 'Acts as the entry point. Responsibilities include:\n- Loading the configuration (hyperparameters, dataset paths, model choice, embedding choice, etc.).\n- Instantiating the DatasetLoader to prepare data loaders.\n- Creating the Model using the selected embedding module and backbone defined in model.py.\n- Invoking the Trainer to perform model training and hyperparameter tuning (using Optuna if enabled).\n- Calling the Evaluation class to compute and print final metrics.\nCoordinates overall flow and integrates all modules.']
+
+----------------------------------------
+[Task list]
+- dataset_loader.py
+- model.py
+- trainer.py
+- evaluation.py
+- main.py
+
+----------------------------------------
+[Full API spec]
+
+
+----------------------------------------
+[Shared Knowledge]
+Shared configuration settings such as hyperparameter search spaces, preprocessing parameters (batch sizes, quantile transform settings), and common utility functions (e.g., for computing metrics and early stopping) are used across modules. A centralized configuration dictionary or file should be defined and imported in dataset_loader.py, model.py, trainer.py, and evaluation.py.
+
+----------------------------------------
+[Anything UNCLEAR]
+Clarification is needed regarding:
+- The exact piecewise linear encoding interpolation details, particularly handling out-of-bound values (x < b0 and x >= bT).
+- Specific hyperparameter distributions for target-aware binning and the periodic embedding (values for σ, k, maximum leaves, minimum items per leaf, and minimum information gain).
+- Recommended hardware configurations for large-scale experiments and any special logging/checkpointing requirements.
+
