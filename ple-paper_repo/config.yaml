@@ -6,7 +6,7 @@ training:
   learning_rate_range: [0.00005, 0.005]  # MLP hyperparameter search range from LogUniform[5e-5, 0.005].
   batch_size: 128  # Default batch size; actual values may be dataset-specific.
   max_epochs: 100  # Number of epochs/iterations as used in the experiments.
-  early_stopping_patience: 16  # Patience value for early stopping (patience + 1 epochs with no improvement).
+  early_stopping_patience: 8  # Patience value for early stopping (patience + 1 epochs with no improvement).
 
 seed: 42  # Random seed for reproducibility.
 
@@ -45,7 +45,7 @@ hyperparameter_tuning:
   trials: 50  # Number of optimization trials.
 
 evaluation:
-  num_seeds: 15  # Number of independent runs for each configuration.
+  num_seeds: 5  # Number of independent runs for each configuration.
   ensemble_groups: 3  # Split 15 runs into 3 ensembles for averaging.
   metrics:
     classification: "accuracy"
