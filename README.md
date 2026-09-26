@@ -72,8 +72,15 @@ These five diagrams split the paper-to-code process into slide-sized stages. Eac
 ### 1. PDF conversion
 
 ```mermaid
-flowchart LR
-  pdf[Academic paper PDF] --> grobid[Grobid parses PDF] --> tei[TEI XML] --> convert[s2orc-doc2json converts TEI to S2ORC JSON] --> json[Structured paper JSON]
+flowchart TB
+  pdf[Academic paper PDF]
+  subgraph pdf2json["PDF to JSON Conversion"]
+    direction TB
+     grobid[Grobid parses PDF] --> tei[TEI XML] --> convert[s2orc-doc2json converts TEI to S2ORC JSON] 
+  end
+  json[Structured paper JSON]
+  pdf --> grobid
+  convert --> json
   classDef transition fill:#fff2cc,stroke:#b8860b,stroke-width:3px,color:#222,font-weight:bold
   class json transition
 ```
