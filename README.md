@@ -99,51 +99,61 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-  subgraph analysis_top[" "]
-    direction LR
-    input[Planning artifacts and configuration] --> cfg["[ANALYSIS] config.py"] --> loader["[ANALYSIS] dataset_loader.py"] --> model["[ANALYSIS] model.py"] --> utils["[ANALYSIS] utils.py"]
+  input[Planning artifacts and configuration]
+  subgraph analysis["Analysis"]
+    cfg["[ANALYSIS] config.py"] --> loader["[ANALYSIS] dataset_loader.py"] --> model["[ANALYSIS] model.py"] --> utils["[ANALYSIS] utils.py"]
+    trainer["[ANALYSIS] trainer.py"] --> evaluation["[ANALYSIS] evaluation.py"] --> main["[ANALYSIS] main.py"]
+    utils --> trainer
   end
-  subgraph analysis_bottom[" "]
-    direction LR
-    trainer["[ANALYSIS] trainer.py"] --> evaluation["[ANALYSIS] evaluation.py"] --> main["[ANALYSIS] main.py"] --> output[Analyzed module specifications]
-  end
-  utils --> trainer
+  output[Analyzed module specifications]
+
+  input --> cfg
+  main --> output
   analysis_usage["LLM: o3-mini<br/>Input: 7,521 | Cached: 194,304<br/>Output: 30,295 | Cost: $0.24843830"]
-  main -. usage .-> analysis_usage
+  analysis -. usage .-> analysis_usage
 ```
 
 ### 4. Coding
 
 ```mermaid
 flowchart TB
-  subgraph coding_top[" "]
+  input[Analyzed module specifications]
+  subgraph coding["Coding"]
+    cfg["[CODING] config.py"] --> loader["[CODING] dataset_loader.py"] --> model["[CODING] model.py"] --> utils["[CODING] utils.py"]
     direction LR
-    input[Analyzed module specifications] --> cfg["[CODING] config.py"] --> loader["[CODING] dataset_loader.py"] --> model["[CODING] model.py"] --> utils["[CODING] utils.py"]
+    trainer["[CODING] trainer.py"] --> evaluation["[CODING] evaluation.py"] --> main["[CODING] main.py"] --> generated[Generated source: Paper2Code/outputs/ple-paper_repo]
+    utils --> trainer
   end
-  subgraph coding_bottom[" "]
-    direction LR
-    trainer["[CODING] trainer.py"] --> evaluation["[CODING] evaluation.py"] --> main["[CODING] main.py"] --> generated[Generated source: Paper2Code/outputs/ple-paper_repo] --> implementation[paper2code-ple/ple-paper_repo]
-  end
-  utils --> trainer
+  implementation[paper2code-ple/ple-paper_repo]
+
+  input --> cfg
+  generated --> implementation
   coding_usage["LLM: o3-mini<br/>Input: 37,235 | Cached: 221,312<br/>Output: 49,610 | Cost: $0.38096410"]
-  main -. usage .-> coding_usage
-  total_usage["Run total: o3-mini<br/>Input: 51,662 | Cached: 517,120<br/>Output: 93,188<br/>Accumulated cost: $0.75127140"]
-  generated -. total usage .-> total_usage
+  coding -. usage .-> coding_usage
 ```
+
+### Paper2Code Overall
+```mermaid
+flowchart TB
+  paper2code["Planning/Analysis/Coding"]
+  total_usage["Run total: o3-mini<br/>Input: 51,662 | Cached: 517,120<br/>Output: 93,188<br/>Accumulated cost: $0.75127140"]
+  paper2code -. total usage .-> total_usage
+
+```
+
 
 ### 5. Run the generated implementation
 
 ```mermaid
 flowchart TB
-  subgraph runtime_top[" "]
-    direction LR
-    implementation[paper2code-ple/ple-paper_repo] --> run[Run: python main.py] --> data[Load configured dataset] --> preprocess[Preprocess and split data]
-  end
-  subgraph runtime_bottom[" "]
-    direction LR
+  implementation[paper2code-ple/ple-paper_repo]
+  subgraph runtime["Run the generated implementation"]
+    run[Run: python main.py] --> data[Load configured dataset] --> preprocess[Preprocess and split data]
     build[Build embeddings and model] --> train[Train configured runs] --> evaluate[Evaluate validation and test sets] --> output[Report metrics and save best_model.pt]
+    preprocess --> build
   end
-  preprocess --> build
+
+  implementation --> run
 ```
 
 ## Configure another dataset
