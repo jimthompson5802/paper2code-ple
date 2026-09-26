@@ -7,7 +7,7 @@ ms.topic: overview
 
 ## Overview
 
-This repository contains a paper-to-code project for tabular deep learning with numerical feature embeddings, including Piecewise Linear Encoding (PLE). The workspace includes the runnable experiment implementation and the planning, analysis, and code-generation artifacts used to develop it.
+This repository contains a paper-to-code project for [tabular deep learning with numerical feature embeddings, including Piecewise Linear Encoding (PLE)](https://arxiv.org/abs/2203.05556). The workspace includes the runnable experiment implementation and the planning, analysis, and code-generation artifacts used to develop it.
 
 ## Repository layout
 
