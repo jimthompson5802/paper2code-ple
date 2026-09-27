@@ -82,6 +82,8 @@ Token usage aggregated from the same logs:
 | Code | 37,235 | 221,312 | 49,610 | 129,048 | 651,264 | 53,356 |
 | Total | 51,662 | 517,120 | 93,188 | 147,060 | 1,184,000 | 98,744 |
 
+For a qualitative comparison of what each model planned, analyzed, and generated, including documented implementation limits and the scope of this Paper2Code code-generation evaluation, see the [LLM-generated code analysis](docs/llm-generated-code-analysis.md).
+
 ## Setup
 
 Use Python 3.10 or later. From the repository root, create a virtual environment, activate it, and install the dependencies:

@@ -11,6 +11,8 @@ This analysis compares the planning, analysis, and coding artifacts in `ple-pape
 
 The summaries below describe what those artifacts proposed and generated at the time. They are not an audit of the current runnable repositories, which may include subsequent changes.
 
+This work was intended to test Paper2Code's code-generation capability, not to fully reproduce the paper's experiments. The generated plans, analyses, and code are therefore evaluated as code-generation artifacts; they should not be taken as a claim of complete experimental replication.
+
 ## Shared reproduction goal
 
 Both LLMs proposed reproducing the paper's numerical-feature embedding experiments. Their plans include PLE and periodic embeddings, MLP/ResNet/Transformer backbones, classification and regression tasks, 11 benchmark datasets, validation-based tuning, repeated seed runs, ensemble evaluation, and comparisons to CatBoost/XGBoost.
@@ -73,4 +75,6 @@ See the [embedding coding artifact](../ple_gpt_5_4_mini/coding_artifacts/models_
 
 ## Interpretation
 
-The distinction is mainly between **breadth of the research plan** and **structure of the generated system**. Both LLMs proposed a similarly broad research target. The `o3-mini` artifacts translate it into a simpler, more centralized implementation; the `gpt-5.4-mini` artifacts translate it into a more explicit, modular experiment framework. Neither set of coding artifacts alone establishes complete fidelity to the paper's datasets, splits, baselines, and ablations.
+The distinction is mainly between **breadth of the research plan** and **structure of the generated system**. Both LLMs proposed a similarly broad research target. The `o3-mini` artifacts translate it into a simpler, more centralized implementation; the `gpt-5.4-mini` artifacts translate it into a more explicit, modular experiment framework.
+
+The artifacts do not, by themselves, establish that either implementation fully reproduces the paper. This is a limitation of the available evidence, not a claim that the implementations are necessarily incorrect. A plan describes intended experiments but does not show that they were run, and the coding-artifact summaries identify gaps between intent and implementation: the `o3-mini` entry point uses a generic dataset setup and does not fully realize the planned benchmark breadth or tuning, while the `gpt-5.4-mini` implementation relies on configured local datasets and has limitations in baseline and categorical-data integration. Both also leave replication details unresolved, including the original dataset-splitting procedure and the periodic-embedding formulation. Establishing fidelity would therefore require checking the runnable implementations and their results against the paper's exact datasets, splits, baselines, and ablations.
