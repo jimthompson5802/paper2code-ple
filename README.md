@@ -73,6 +73,15 @@ The planning artifacts and generated implementations were produced with LLM assi
 
 The values are summarized from [ple-paper/cost_info.log](ple-paper/cost_info.log) and [ple_gpt_5_4_mini/cost_info.log](ple_gpt_5_4_mini/cost_info.log). They represent the logged generation runs and may not include later source edits.
 
+Token usage aggregated from the same logs:
+
+| Phase | o3-mini input | o3-mini cached | o3-mini output | gpt-5.4-mini input | gpt-5.4-mini cached | gpt-5.4-mini output |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plan | 6,906 | 101,504 | 13,283 | 3,327 | 113,664 | 10,077 |
+| Analyze | 7,521 | 194,304 | 30,295 | 14,685 | 419,072 | 35,311 |
+| Code | 37,235 | 221,312 | 49,610 | 129,048 | 651,264 | 53,356 |
+| Total | 51,662 | 517,120 | 93,188 | 147,060 | 1,184,000 | 98,744 |
+
 ## Setup
 
 Use Python 3.10 or later. From the repository root, create a virtual environment, activate it, and install the dependencies:
