@@ -26,6 +26,7 @@ The experiment implementation is in `ple-paper_repo/`. Its main modules are:
 | `create_dataset.py` | Fetches the California Housing dataset and writes `data/ca-housing.csv` |
 | `dataset_loader.py` | Loads the configured CSV, preprocesses features, and creates train, validation, and test splits |
 | `model.py` | Defines PLE and periodic feature embeddings and neural network backbones |
+| `ple_demo.py` | Generates random numeric values, prints the 10-bin PLE boundaries, and displays sample encodings |
 | `trainer.py` | Implements model training, validation, early stopping, and checkpoint saving |
 | `evaluation.py` | Computes validation and test metrics, including ensemble results |
 | `utils.py` | Provides seeding, metric calculations, logging, and parameter-count helpers |
@@ -64,6 +65,17 @@ python main.py
 ```
 
 The experiment trains the number of models configured by `evaluation.num_seeds`, reports validation and test metrics, and writes the best model checkpoint as `best_model.pt` in the current working directory. Training can take some time with multiple seeds and up to `training.max_epochs` epochs. For a shorter development run, reduce those configuration values in `ple-paper_repo/config.yaml`.
+
+## Run the PLE demo
+
+The standalone demo generates 1,000 reproducible floating-point values between 0 and 100, encodes each value into a 10-element PLE vector, prints the bin boundaries, and displays a random five-row sample. Run it from the implementation directory:
+
+```bash
+cd ple-paper_repo
+python ple_demo.py
+```
+
+The equal-width bin boundaries are 0, 10, 20, ..., 100. The printed PLE column contains the raw bin activations for each sampled value.
 
 ## End-to-end paper-to-code workflow
 
