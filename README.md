@@ -62,9 +62,16 @@ and coding artifacts.
 
 ## LLM-assisted generation
 
-The planning artifacts and generated implementation in `ple-paper/` and `ple-paper_repo/` were created with LLM assistance using `o3-mini`. The corresponding planning artifacts and generated implementation in `ple_gpt_5_4_mini/` and `ple_gpt_5_4_mini_repo/` were created with LLM assistance using `gpt-5.4-mini`. The generation logs record the model and usage by planning, analysis, and coding stage: [ple-paper/cost_info.log](ple-paper/cost_info.log) and [ple_gpt_5_4_mini/cost_info.log](ple_gpt_5_4_mini/cost_info.log).
+The planning artifacts and generated implementations were produced with LLM assistance. The cost logs report usage by planning, analysis, and coding stage. The table aggregates each stage across its logged files.
 
-These logs describe the recorded generation runs; they do not necessarily include later edits made to the source files.
+| Phase | o3-mini | gpt-5.4-mini |
+| --- | ---: | ---: |
+| Plan | $0.1219 | $0.0564 |
+| Analyze | $0.2484 | $0.2013 |
+| Code | $0.3810 | $0.3857 |
+| Total | $0.7513 | $0.6434 |
+
+The values are summarized from [ple-paper/cost_info.log](ple-paper/cost_info.log) and [ple_gpt_5_4_mini/cost_info.log](ple_gpt_5_4_mini/cost_info.log). They represent the logged generation runs and may not include later source edits.
 
 ## Setup
 
