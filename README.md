@@ -74,6 +74,17 @@ The standalone demo generates 1,000 reproducible floating-point values between 0
 cd ple-paper_repo
 python ple_demo.py
 ```
+Expected output
+```
+$ uv run python ple_demo.py
+PLE bin boundaries: [0.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0]
+ numeric_value                                                                 ple
+     37.226158   [1.0, 1.0, 1.0, 0.7226158380508423, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+     30.207157 [1.0, 1.0, 1.0, 0.020715713500976562, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      0.166071 [0.016607077792286873, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+     27.482506   [1.0, 1.0, 0.7482506036758423, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+     65.012505   [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.5012504458427429, 0.0, 0.0, 0.0]
+```
 
 The equal-width bin boundaries are 0, 10, 20, ..., 100. The printed PLE column contains the raw bin activations for each sampled value.
 
