@@ -1,36 +1,70 @@
 ---
 title: "Paper2Code PLE"
 description: "Repository guide for the PLE experiment implementation and its generated planning and coding artifacts."
-ms.date: 2026-09-26
+ms.date: 2026-09-27
 ms.topic: overview
 ---
 
 ## Overview
 
-This repository contains a paper-to-code project for [tabular deep learning with numerical feature embeddings, including Piecewise Linear Encoding (PLE)](https://arxiv.org/abs/2203.05556). The workspace includes the runnable experiment implementation and the planning, analysis, and code-generation artifacts used to develop it.
+This repository contains a paper-to-code project for [tabular deep learning with numerical feature embeddings, including Piecewise Linear Encoding (PLE)](https://arxiv.org/abs/2203.05556). It includes the original generated implementation, a newer experiment implementation with a single-run PLE setup, shared California Housing data, and the planning, analysis, and code-generation artifacts used to develop them.
 
 ## Repository layout
 
 | Path | Contents |
 | --- | --- |
-| `ple-paper_repo/` | Runnable Python experiment, YAML configuration, dataset utility, and California Housing CSV |
-| `ple-paper/` | Planning documents, analysis and coding artifacts, generated responses and trajectories, and cost records |
+| `data/` | Shared California Housing CSV used by `ple_gpt_5_4_mini_repo/` |
+| `ple-paper_repo/` | Original runnable Python experiment, YAML configuration, and dataset utility |
+| `ple-paper/` | Planning documents, analysis and coding artifacts, generated responses and trajectories, and cost records for the original implementation |
+| `ple_gpt_5_4_mini/` | Planning, analysis, coding artifacts, generated responses and trajectories, and cost records for the newer implementation |
+| `ple_gpt_5_4_mini_repo/` | Newer runnable experiment, standard and simple-run configurations, PLE demo, and generated outputs |
 | `requirements.txt` | Python package dependencies for the project |
 
-The experiment implementation is in `ple-paper_repo/`. Its main modules are:
+This workspace has two runnable implementations. The `ple-paper/` and
+`ple_gpt_5_4_mini/` directories contain their corresponding planning, analysis,
+and coding artifacts.
+
+### Paper2Code with o3-mini: `ple-paper_repo/`
 
 | File | Purpose |
 | --- | --- |
-| `config.yaml` | Dataset path and target column, preprocessing, embedding, model, training, and evaluation settings |
-| `config.py` | Loads and validates the YAML configuration and provides configuration accessors |
-| `create_dataset.py` | Fetches the California Housing dataset and writes `data/ca-housing.csv` |
-| `dataset_loader.py` | Loads the configured CSV, preprocesses features, and creates train, validation, and test splits |
-| `model.py` | Defines PLE and periodic feature embeddings and neural network backbones |
-| `ple_demo.py` | Generates random numeric values, prints the 10-bin PLE boundaries, and displays sample encodings |
-| `trainer.py` | Implements model training, validation, early stopping, and checkpoint saving |
-| `evaluation.py` | Computes validation and test metrics, including ensemble results |
-| `utils.py` | Provides seeding, metric calculations, logging, and parameter-count helpers |
-| `main.py` | Connects configuration, data loading, model creation, training, and evaluation |
+| `config.yaml` | Dataset, preprocessing, embedding, backbone, training, and evaluation settings |
+| `config.py` | Loads YAML settings and provides configuration accessors |
+| `create_dataset.py` | Fetches California Housing data and writes a local CSV copy |
+| `dataset_loader.py` | Loads data, preprocesses features, and creates train, validation, and test splits |
+| `model.py` | Defines PLE and periodic embeddings and neural network backbones |
+| `ple_demo.py` | Displays sample raw PLE encodings for generated values |
+| `trainer.py` | Trains models with validation, early stopping, and checkpointing |
+| `evaluation.py` | Computes validation, test, and ensemble metrics |
+| `utils.py` | Provides reproducibility, metrics, logging, and parameter-count helpers |
+| `main.py` | Orchestrates data loading, model construction, training, and evaluation |
+
+### Paper2Code with gpt-5.4-mini: `ple_gpt_5_4_mini_repo/`
+
+| Path | Purpose |
+| --- | --- |
+| `config.yaml` | Main experiment settings for the paper protocol |
+| `config_simple.yaml` | Fixed one-seed California Housing PLE run without tuning |
+| `main.py` | Command-line experiment orchestration and JSON artifact saving |
+| `data/dataset_loader.py` | Loads the shared CSV and creates data splits |
+| `data/preprocessing.py` | Fits numerical and categorical preprocessing on training data |
+| `models/embeddings.py` | Implements linear, PLE, and periodic embeddings |
+| `models/backbones.py` | Implements MLP, ResNet, and Transformer backbones |
+| `models/tabular_model.py` | Combines embeddings, backbones, and prediction heads |
+| `training/trainer.py` | Trains one model, validates each epoch, and evaluates test predictions |
+| `training/tuning.py` | Runs optional Optuna hyperparameter tuning |
+| `evaluation/metrics.py` | Computes classification and regression metrics |
+| `evaluation/ensemble.py` | Combines seed-level predictions into ensembles |
+| `baselines/gbdt.py` | Runs optional CatBoost and XGBoost baselines |
+| `utils/io.py`, `utils/reproducibility.py` | Loads configuration, saves JSON artifacts, and controls random seeds |
+| `ple_demo.py` | Demonstrates raw PLE encodings |
+| `outputs/` | Stores experiment summaries and selected configuration files |
+
+## LLM-assisted generation
+
+The planning artifacts and generated implementation in `ple-paper/` and `ple-paper_repo/` were created with LLM assistance using `o3-mini`. The corresponding planning artifacts and generated implementation in `ple_gpt_5_4_mini/` and `ple_gpt_5_4_mini_repo/` were created with LLM assistance using `gpt-5.4-mini`. The generation logs record the model and usage by planning, analysis, and coding stage: [ple-paper/cost_info.log](ple-paper/cost_info.log) and [ple_gpt_5_4_mini/cost_info.log](ple_gpt_5_4_mini/cost_info.log).
+
+These logs describe the recorded generation runs; they do not necessarily include later edits made to the source files.
 
 ## Setup
 
@@ -46,7 +80,9 @@ python -m pip install -r requirements.txt
 
 The default experiment reads the CSV configured by `training.data_fp` in `ple-paper_repo/config.yaml`. The default path is `data/ca-housing.csv`, and the target column is `MedHouseVal`.
 
-The dataset CSV is located in `ple-paper_repo/data/`. To regenerate it, run the script from the implementation directory:
+The checked-in California Housing CSV is now located at `data/ca-housing.csv` in the repository root. The newer `ple_gpt_5_4_mini_repo/` reads this shared file through `config_simple.yaml` using the relative path `../data/ca-housing.csv`.
+
+The original `ple-paper_repo/` configuration expects a local `data/ca-housing.csv`. If you need to regenerate that copy, run the downloader from its implementation directory:
 
 ```bash
 cd ple-paper_repo
@@ -54,6 +90,19 @@ python create_dataset.py
 ```
 
 Dataset generation uses scikit-learn's California Housing dataset fetcher and may need internet access if the dataset is not cached locally.
+
+## Run the simple PLE experiment
+
+The newer implementation includes a one-seed California Housing run using the `MLP-Q-LR` model. It applies quantile PLE to all numerical input features, including `MedInc`, skips Optuna tuning and ensemble evaluation, and writes JSON artifacts.
+
+From the repository root, run:
+
+```bash
+cd ple_gpt_5_4_mini_repo
+python main.py --config config_simple.yaml --no-tuning --no-ensemble
+```
+
+Results are written to `ple_gpt_5_4_mini_repo/outputs/ca/MLP-Q-LR/`. See [the mini-repository README](ple_gpt_5_4_mini_repo/README.md) for configuration details and artifact descriptions.
 
 ## Run the experiment
 
