@@ -109,6 +109,24 @@ class PLEEmbedding(EmbeddingModule):
         self.register_buffer("boundaries", boundaries)
         self.boundaries = boundaries
 
+    def encode_bins(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the raw piecewise-linear activation for each bin.
+
+        Args:
+            x (torch.Tensor): Tensor of shape (batch_size, 1) containing raw scalar features.
+
+        Returns:
+            torch.Tensor: Raw PLE activations of shape (batch_size, bins).
+        """
+        if self.boundaries is None:
+            raise ValueError("Boundaries are not set for PLEEmbedding.")
+        lower: torch.Tensor = self.boundaries[:-1].unsqueeze(0)
+        upper: torch.Tensor = self.boundaries[1:].unsqueeze(0)
+        x_expanded: torch.Tensor = x.expand(-1, self.bins)
+        fraction: torch.Tensor = (x_expanded - lower) / (upper - lower)
+        e: torch.Tensor = torch.where(x_expanded >= upper, torch.ones_like(fraction), fraction)
+        return torch.where(x_expanded < lower, torch.zeros_like(fraction), e)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass for the PLE embedding.
@@ -121,27 +139,8 @@ class PLEEmbedding(EmbeddingModule):
         Returns:
             torch.Tensor: Tensor of shape (batch_size, embedding_dim) with the final embedding.
         """
-        if self.boundaries is None:
-            raise ValueError("Boundaries are not set for PLEEmbedding.")
-        # Extract lower and upper boundaries from the boundaries tensor.
-        # boundaries shape: (bins+1,) => lower: (bins,), upper: (bins,)
-        lower: torch.Tensor = self.boundaries[:-1]
-        upper: torch.Tensor = self.boundaries[1:]
-        # Reshape for broadcasting: (1, bins)
-        lower = lower.unsqueeze(0)
-        upper = upper.unsqueeze(0)
-        # Expand input x to shape: (batch_size, bins)
-        x_expanded: torch.Tensor = x.expand(-1, self.bins)
-        # Compute the raw fractional activation.
-        fraction: torch.Tensor = (x_expanded - lower) / (upper - lower)
-        # Apply piecewise conditions:
-        # If x >= upper => output 1; if x < lower => output 0; otherwise use the fraction.
-        ones_tensor: torch.Tensor = torch.ones_like(fraction)
-        zeros_tensor: torch.Tensor = torch.zeros_like(fraction)
-        e: torch.Tensor = torch.where(x_expanded >= upper, ones_tensor, fraction)
-        e = torch.where(x_expanded < lower, zeros_tensor, e)
-        # Fuse the T-dimensional vector through a linear layer.
-        embedding: torch.Tensor = self.fusion(e)
+        # Fuse the raw T-dimensional PLE representation.
+        embedding: torch.Tensor = self.fusion(self.encode_bins(x))
         return embedding
 
 
