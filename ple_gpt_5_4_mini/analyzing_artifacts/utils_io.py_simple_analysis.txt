@@ -1,0 +1,515 @@
+# Logic Analysis: `utils/io.py`
+
+This module is the configuration and persistence hub for the entire reproduction pipeline. It must support:
+
+- loading the experiment configuration from `config.yaml`
+- serializing results, tuned hyperparameters, predictions, and checkpoints metadata
+- deserializing previously saved artifacts
+- providing a typed, reproducible config object that downstream modules can rely on
+
+It is a foundational utility because every experiment path in the paper depends on consistent configuration handling.
+
+---
+
+## 1) Role of this module in the reproduction system
+
+`utils/io.py` should be responsible for two separate concerns:
+
+### A. Configuration loading
+It must read the provided `config.yaml` and convert it into a structured experiment configuration object or dictionary.
+
+This config object must preserve the hierarchy and values exactly as specified in `config.yaml`, because the reproduction must not invent any values. The module should serve as the single source of truth for:
+
+- experiment seed control
+- number of seeds and ensemble settings
+- preprocessing policy
+- training settings
+- tuning search spaces
+- model hyperparameter ranges
+- baseline settings
+- evaluation settings
+- implementation constraints
+
+### B. Artifact persistence
+It must save and load experiment artifacts in a format that is easy to reuse across the pipeline, including:
+
+- tuned hyperparameters
+- validation/test metrics
+- predictions
+- ensemble outputs
+- training logs
+- possibly model metadata or checkpoint references
+
+The module must not implement training or evaluation logic itself; it only provides reliable I/O utilities.
+
+---
+
+## 2) Configuration schema to support
+
+The paper and config define a nested schema that must be preserved faithfully. The loader should not flatten or reinterpret it.
+
+The expected top-level fields are:
+
+- `experiment`
+- `data`
+- `training`
+- `hyperparameter_tuning`
+- `models`
+- `evaluation`
+- `baselines`
+- `notes`
+
+### 2.1 Required `experiment` fields
+From `config.yaml`:
+
+- `seed`
+- `num_seeds`
+- `num_ensembles`
+- `ensemble_group_size`
+
+These are used by:
+- `utils/reproducibility.py`
+- `training/trainer.py`
+- `evaluation/ensemble.py`
+- `main.py`
+
+### 2.2 Required `data` fields
+From `config.yaml`:
+
+- `data.preprocessing.numerical.default`
+- `data.preprocessing.numerical.otto_group_product_classification`
+- `data.preprocessing.categorical.default`
+- `data.target.regression_standardization`
+
+These must drive preprocessing decisions exactly as the paper describes:
+- quantile transform by default
+- no numerical preprocessing for Otto
+- one-hot encoding for categorical features
+- target standardization for regression
+
+### 2.3 Required `training` fields
+From `config.yaml`:
+
+- `optimizer`
+- `loss.classification`
+- `loss.regression`
+- `learning_rate.mlp`
+- `learning_rate.resnet`
+- `learning_rate.transformer.sa_co_mi`
+- `learning_rate.transformer.other`
+- `batch_size.*` for all datasets
+- `early_stopping.patience`
+- `early_stopping.min_delta`
+- `lr_schedule`
+- `max_epochs`
+
+These values are referenced by:
+- `training/trainer.py`
+- `training/tuning.py`
+- `models/backbones.py`
+- `main.py`
+
+### 2.4 Required `hyperparameter_tuning` fields
+From `config.yaml`:
+
+- `method`
+- `trials`
+- `search_spaces.linear_embedding_output_dim`
+- `search_spaces.ple_quantiles`
+- `search_spaces.ple_tree.max_leaves`
+- `search_spaces.ple_tree.min_items_per_leaf`
+- `search_spaces.ple_tree.min_information_gain`
+- `search_spaces.periodic_k`
+
+These must be accessible unchanged because tuning logic must use them directly.
+
+### 2.5 Required `models` fields
+From `config.yaml`:
+
+- `models.mlp.layers`
+- `models.mlp.layer_size`
+- `models.mlp.dropout`
+- `models.mlp.weight_decay`
+- `models.resnet.layers`
+- `models.resnet.layer_size`
+- `models.resnet.hidden_factor`
+- `models.resnet.hidden_dropout`
+- `models.resnet.residual_dropout`
+- `models.resnet.weight_decay`
+- `models.transformer.layers.sa_co_mi`
+- `models.transformer.layers.other`
+- `models.transformer.embedding_size.sa_co_mi`
+- `models.transformer.embedding_size.other`
+- `models.transformer.residual_dropout.sa_co_mi`
+- `models.transformer.residual_dropout.other`
+- `models.transformer.attention_dropout`
+- `models.transformer.ffn_dropout`
+- `models.transformer.ffn_factor`
+- `models.transformer.weight_decay.sa_co_mi`
+- `models.transformer.weight_decay.other`
+
+These should be used by `training/tuning.py` and `models/backbones.py`.
+
+### 2.6 Required `evaluation` fields
+From `config.yaml`:
+
+- `metrics.classification`
+- `metrics.regression`
+- `validation_selection`
+- `test_runs_per_tuned_config`
+
+These determine:
+- validation selection criteria
+- metric computation
+- repeated evaluation runs
+
+### 2.7 Required `baselines` fields
+From `config.yaml`:
+
+- `baselines.catboost.fixed.early_stopping_rounds`
+- `baselines.catboost.fixed.od_pval`
+- `baselines.catboost.fixed.iterations`
+- `baselines.catboost.tuning.max_depth`
+- `baselines.catboost.tuning.learning_rate`
+- `baselines.catboost.tuning.bagging_temperature`
+- `baselines.catboost.tuning.l2_leaf_reg`
+- `baselines.catboost.tuning.leaf_estimation_iterations`
+- `baselines.xgboost.fixed.booster`
+- `baselines.xgboost.fixed.early_stopping_rounds`
+- `baselines.xgboost.fixed.n_estimators`
+- `baselines.xgboost.tuning.max_depth`
+- `baselines.xgboost.tuning.min_child_weight`
+- `baselines.xgboost.tuning.subsample`
+- `baselines.xgboost.tuning.learning_rate`
+- `baselines.xgboost.tuning.colsample_bytree`
+- `baselines.xgboost.tuning.gamma`
+- `baselines.xgboost.tuning.lambda`
+
+These are consumed by `baselines/gbdt.py`.
+
+---
+
+## 3) Interface responsibilities
+
+The task specifies these public functions:
+
+- `load_config(path)`
+- `save_json(obj, path)`
+- `save_pickle(obj, path)`
+- `load_pickle(path)`
+
+This module must provide these functions exactly.
+
+### 3.1 `load_config(path)`
+This function should:
+
+1. Accept a file path to YAML or JSON
+2. Parse the file content
+3. Return a structured config object
+
+The returned object should be suitable for direct use by the rest of the pipeline. It can be either:
+- a nested dictionary, or
+- a typed dataclass / pydantic object
+
+Given the design and shared knowledge, a typed object is preferable for consistency, but the implementation must remain lightweight.
+
+#### Logic requirements
+- preserve nested structure
+- keep numeric values exactly as given in `config.yaml`
+- do not infer missing values
+- do not apply defaults unless explicitly encoded in the config
+- allow access to nested fields in a stable way
+
+#### Recommended behavior
+- detect file extension or attempt YAML parsing first, then JSON fallback
+- support `.yaml`, `.yml`, and `.json`
+- return an `ExperimentConfig`-like object or a nested dict matching the config schema
+
+### 3.2 `save_json(obj, path)`
+This function should serialize Python objects to JSON for:
+- hyperparameter summaries
+- validation/test metrics
+- ensemble scores
+- experiment metadata
+
+#### Logic requirements
+- create parent directories if needed
+- convert non-JSON-native objects using a safe serializer
+- ensure deterministic formatting if possible
+- do not silently lose important numeric precision
+
+### 3.3 `save_pickle(obj, path)`
+This function should save arbitrary Python objects, especially:
+- trained model metadata
+- split objects
+- preprocessing objects
+- prediction arrays
+- Optuna study objects if needed
+
+#### Logic requirements
+- create parent directories if needed
+- use standard pickle protocol
+- be compatible with NumPy arrays, pandas objects, and model-related objects
+
+### 3.4 `load_pickle(path)`
+This function should load previously saved pickle artifacts.
+
+#### Logic requirements
+- exact inverse of `save_pickle`
+- validate path existence before loading
+- return the original object
+
+---
+
+## 4) Data structures and config handling strategy
+
+Although the design allows a dict-like config, the module should aim for a lightweight typed structure to improve reproducibility and reduce accidental key mismatches.
+
+### 4.1 Suggested config representation
+Use a dataclass-based object or nested dataclass tree, if implemented cleanly.
+
+At minimum, the loaded config should provide access to:
+- `config.experiment.seed`
+- `config.training.max_epochs`
+- `config.models.transformer.layers.other`
+- etc.
+
+If a fully typed nested dataclass tree is too cumbersome, a nested mapping with helper access is acceptable, but it must remain stable and explicit.
+
+### 4.2 Preservation of raw values
+The loader should not coerce values beyond what parsing naturally yields.
+
+Examples:
+- `5.0e-05` should load as float
+- `[1, 16]` should remain a two-element list
+- `0.0` should remain float
+- `"gbtree"` should remain string
+
+### 4.3 No invented defaults
+The config file already specifies:
+- seed = 42
+- num_seeds = 15
+- patience = 16
+- max_epochs = 100
+- etc.
+
+The module must not invent replacements if a key is missing. Instead:
+- either raise a clear error
+- or return the loaded data as-is and let downstream modules validate required fields
+
+For reproducibility, the safer choice is to validate required keys and fail early if anything is missing.
+
+---
+
+## 5) Validation logic that should exist in `load_config`
+
+The configuration file is central to the experiment. The loader should validate the presence of all required top-level sections and key nested paths.
+
+### 5.1 Required top-level sections
+Validate that the config contains:
+- `experiment`
+- `data`
+- `training`
+- `hyperparameter_tuning`
+- `models`
+- `evaluation`
+- `baselines`
+
+`notes` can be treated as optional metadata, though it is present.
+
+### 5.2 Required consistency checks
+The loader should check that:
+
+- `experiment.num_seeds` matches the paper’s 15-seed evaluation protocol
+- `experiment.num_ensembles` and `experiment.ensemble_group_size` are consistent
+- `training.lr_schedule` is `none`
+- `training.early_stopping.patience` is present and matches the config
+- `data.preprocessing.numerical.otto_group_product_classification` is `none`
+- `evaluation.test_runs_per_tuned_config` equals the number of repeated seed evaluations
+- `training.loss.classification` and `training.loss.regression` are both specified
+- all dataset batch sizes are present
+- transformer-specific dataset group keys (`sa_co_mi`, `other`) exist
+
+These checks ensure the rest of the system can rely on a complete config.
+
+---
+
+## 6) Serialization requirements for reproducibility
+
+This module is not just for configs; it also supports the experiment lifecycle.
+
+### 6.1 JSON outputs to support
+Use JSON for:
+- tuned hyperparameters per model-dataset pair
+- validation results
+- test results
+- rank tables
+- ensemble metrics
+- experiment manifests
+
+These are human-readable and easy to compare between runs.
+
+### 6.2 Pickle outputs to support
+Use pickle for:
+- cached datasets or processed splits
+- preprocessing transformers
+- Optuna studies
+- prediction arrays if needed
+- checkpoint metadata if storing non-torch objects
+
+For actual model weights, PyTorch checkpoint saving may happen elsewhere, but `save_pickle` can still store associated metadata.
+
+---
+
+## 7) Interaction with the rest of the pipeline
+
+This module must integrate cleanly with all other modules in the design.
+
+### 7.1 `main.py`
+`main.py` should call:
+- `load_config(config_path)`
+- `save_json(...)` for outputs
+- `save_pickle(...)` for caches or studies if needed
+
+### 7.2 `utils/reproducibility.py`
+Configuration loading happens before:
+- `set_seed(config.experiment.seed)`
+- `set_deterministic()`
+
+So `load_config()` must return the seed value in a directly accessible location.
+
+### 7.3 `training/tuning.py`
+The tuner needs:
+- tuning method
+- trial count
+- search spaces
+- model ranges
+- dataset-dependent transformer ranges
+
+The config loader must preserve all of these nested structures exactly.
+
+### 7.4 `baselines/gbdt.py`
+GBDT baseline code depends on:
+- fixed CatBoost/XGBoost settings
+- tuning parameter ranges
+- dataset-specific GPU/CPU behavior from the paper’s logic
+
+The module should simply expose these settings unchanged.
+
+---
+
+## 8) Path handling requirements
+
+All I/O functions should work robustly across environments.
+
+### 8.1 `pathlib.Path` support
+Accept both strings and `Path` objects.
+
+### 8.2 Parent directory creation
+For save functions:
+- create parent directories automatically if they do not exist
+
+### 8.3 Existence checks
+For load functions:
+- validate that the file exists
+- raise a clear error if not found
+
+### 8.4 Extension handling
+`load_config()` should support:
+- `.yaml`
+- `.yml`
+- `.json`
+
+For output functions:
+- `save_json` should ensure `.json` output paths are accepted
+- `save_pickle` can use any suffix, but `.pkl` or `.pickle` is recommended
+
+---
+
+## 9) Determinism and reproducibility considerations
+
+Although this module does not set seeds itself, it affects reproducibility through deterministic config handling and artifact storage.
+
+### 9.1 Stable config parsing
+Repeated loads of the same config file should yield equivalent structures.
+
+### 9.2 Stable serialization
+When saving JSON:
+- use stable key ordering if possible
+- use indentation to make outputs auditable
+- avoid nondeterministic formatting
+
+### 9.3 Artifact traceability
+Saved outputs should ideally include:
+- dataset name
+- model name
+- seed
+- timestamp or run ID if handled externally
+
+If `utils/io.py` does not generate run IDs itself, it should at least support saving to structured paths chosen by `main.py`.
+
+---
+
+## 10) Error handling strategy
+
+The module should fail fast and clearly.
+
+### 10.1 Config parsing errors
+If YAML/JSON parsing fails:
+- raise a descriptive exception
+- include the file path in the error message
+
+### 10.2 Missing key errors
+If required config keys are missing:
+- raise a clear validation error
+- identify which key path is absent
+
+### 10.3 Serialization errors
+If a given object cannot be serialized to JSON:
+- either convert it safely
+- or raise a descriptive error rather than silently truncating data
+
+---
+
+## 11) What this module should not do
+
+To keep the design clean and faithful to the paper:
+
+- do not perform data loading
+- do not split datasets
+- do not preprocess data
+- do not build models
+- do not train models
+- do not compute metrics
+- do not tune hyperparameters
+
+It should only handle:
+- config loading/validation
+- JSON/pickle persistence
+
+---
+
+## 12) Recommended implementation priorities
+
+Order of implementation for this module:
+
+1. Implement `load_config(path)`
+2. Add schema validation for required keys
+3. Implement `save_json(obj, path)`
+4. Implement `save_pickle(obj, path)`
+5. Implement `load_pickle(path)`
+6. Add helper functions for path normalization and safe serialization
+
+---
+
+## 13) Paper alignment summary
+
+This module supports the reproduction of the paper by ensuring:
+
+- the exact `config.yaml` governs experiment behavior
+- all hyperparameters and dataset policies match the paper
+- tuning/search spaces are read from configuration, not hardcoded
+- evaluation settings such as 15 seeds and ensemble grouping are preserved
+- all saved outputs are reproducible and traceable
+
+In short, `utils/io.py` is the glue that guarantees the rest of the system follows the paper’s experimental protocol exactly.

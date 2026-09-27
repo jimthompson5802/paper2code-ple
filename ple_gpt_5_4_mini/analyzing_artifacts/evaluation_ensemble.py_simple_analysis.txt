@@ -1,0 +1,239 @@
+### Logic Analysis for `evaluation/ensemble.py`
+
+This module must implement the **3-way ensemble evaluation protocol** described in the paper and constrained by `config.yaml`.
+
+---
+
+## 1) Purpose of this module
+
+`evaluation/ensemble.py` is responsible for:
+
+1. Taking predictions from **15 trained seeds** for a tuned model-dataset pair.
+2. Splitting those 15 runs into **3 disjoint groups of 5**.
+3. Averaging predictions within each group to form **3 ensemble predictions**.
+4. Evaluating each ensemble using the correct metric for the task:
+   - **Accuracy** for classification
+   - **RMSE** for regression
+5. Returning ensemble metrics in a format compatible with the rest of the evaluation pipeline.
+
+This module must **not** perform training, tuning, or preprocessing. It only aggregates already-computed predictions and evaluates them.
+
+---
+
+## 2) Paper-aligned behavior
+
+The paper explicitly states:
+
+- “For each model-dataset pair, we obtain three ensembles by splitting the 15 single models into three disjoint groups of equal size and averaging predictions of single models within each group.”
+
+The logic must therefore follow these exact constraints:
+
+- Exactly **15 predictions** per model-dataset pair are expected for ensemble construction.
+- The 15 predictions are partitioned into **3 groups of 5**.
+- No overlapping between groups.
+- Ensemble score is computed on the averaged predictions of each group.
+
+The `config.yaml` confirms this with:
+
+- `experiment.num_seeds: 15`
+- `experiment.num_ensembles: 3`
+- `experiment.ensemble_group_size: 5`
+
+So the implementation must use these values as the expected protocol, not hardcoded arbitrary values.
+
+---
+
+## 3) Input/output expectations
+
+### Expected input
+The module should accept prediction arrays from multiple seeds, likely in a structure such as:
+
+- a list of 15 arrays
+- each array corresponding to one seed’s test predictions
+- each array having the same shape and alignment with the test targets
+
+Because the design spec does not define extra public interfaces, the ensemble logic should be implemented within the allowed class methods of `EnsembleEvaluator`.
+
+### Expected output
+The evaluator should return:
+
+- per-ensemble metrics for the 3 groups
+- optionally an aggregate summary across the 3 ensembles
+
+The exact return format should align with the rest of the project’s metric reporting, but the key requirement is that it must support:
+- metric computation for each ensemble
+- group-wise averaging result
+- final metric dictionary for downstream logging/saving
+
+---
+
+## 4) Core ensemble logic
+
+### 4.1 Grouping logic
+Given 15 seed-level prediction vectors:
+
+- group 1 = predictions from seeds 1–5
+- group 2 = predictions from seeds 6–10
+- group 3 = predictions from seeds 11–15
+
+The paper only says “split into three disjoint groups of equal size” and does not specify random shuffling at this step. Therefore:
+
+- if upstream code preserves seed order, this module should **respect the input order**
+- if the project wants deterministic grouping, it should group by the order in which predictions are supplied
+- do **not** introduce random regrouping here unless explicitly required elsewhere
+
+This keeps the behavior reproducible and consistent with the paper.
+
+---
+
+### 4.2 Averaging predictions
+For each group:
+
+- stack the 5 prediction arrays
+- compute the arithmetic mean along the seed axis
+
+This averaged prediction is the ensemble prediction for that group.
+
+#### For classification:
+The module must preserve compatibility with the metric implementation in `evaluation/metrics.py`.
+
+Two possibilities exist upstream:
+
+1. The model returns probabilities/logits and the evaluator converts to class labels for accuracy.
+2. The model already returns class labels.
+
+Because the design and paper emphasize consistent metric handling, the ensemble evaluator should **delegate final metric interpretation to `MetricsEvaluator`** rather than hardcoding label thresholding here, except where necessary and already consistent with the prediction format used elsewhere.
+
+For binary classification, if predictions are probabilistic, the same thresholding policy used in the rest of the pipeline must be applied consistently.
+
+#### For regression:
+- The ensemble prediction is the mean of the 5 scalar predictions
+- Metric is RMSE against ground truth
+
+---
+
+## 5) Metric computation responsibilities
+
+This module must depend on `evaluation.metrics` and use it as the single source of truth for metric computation.
+
+### Required behavior:
+- Determine task type:
+  - classification → accuracy
+  - regression → RMSE
+- Call the appropriate function in `MetricsEvaluator`
+- Avoid duplicating metric formulas here
+
+This is important for consistency because the paper compares:
+- single models
+- tuned models
+- ensembles
+
+All of these should be evaluated with the exact same metric logic.
+
+---
+
+## 6) Configuration-driven constraints
+
+The module must align with the values in `config.yaml`:
+
+- `experiment.num_seeds = 15`
+- `experiment.num_ensembles = 3`
+- `experiment.ensemble_group_size = 5`
+
+The ensemble evaluator should validate these assumptions logically:
+
+- number of prediction sets should match `num_seeds`
+- number of ensembles should match `num_ensembles`
+- each group should contain `ensemble_group_size` predictions
+
+If the provided predictions do not match this expected layout, the module should fail loudly or raise a clear error, because the paper’s ensemble protocol is fixed.
+
+---
+
+## 7) Suggested internal flow
+
+The internal logic should be:
+
+1. Receive predictions and targets.
+2. Verify the count of prediction arrays is 15.
+3. Partition predictions into 3 groups of 5.
+4. Average predictions within each group.
+5. For each group:
+   - compute the metric using `MetricsEvaluator`
+6. Return:
+   - per-group metrics
+   - optionally their mean/std if needed by the reporting layer
+
+This module should stay lightweight and deterministic.
+
+---
+
+## 8) Shape and type considerations
+
+To avoid evaluation bugs, the evaluator must ensure:
+
+- all prediction arrays have identical shapes
+- all predictions correspond to the same test sample order
+- regression outputs are numeric vectors
+- classification outputs are in the format expected by `MetricsEvaluator`
+
+If predictions are torch tensors upstream, they should already be converted to numpy arrays before entering this module, or converted here only if the design allows it. Given the design list and shared architecture, this module should preferably operate on `numpy.ndarray` inputs.
+
+---
+
+## 9) What this module should not do
+
+To remain faithful to the design:
+
+- It should **not** train models
+- It should **not** tune hyperparameters
+- It should **not** perform data splitting
+- It should **not** implement preprocessing
+- It should **not** alter the seed-level predictions beyond averaging within groups
+- It should **not** invent a different ensemble scheme such as:
+  - majority vote across all 15
+  - stacking
+  - weighted averaging
+  - cross-validated blending
+
+The paper uses a simple equal-weight mean ensemble only.
+
+---
+
+## 10) Reproducibility note
+
+The ensemble procedure is deterministic **given the prediction list order**.
+
+Therefore:
+- reproducibility depends on upstream seed ordering being fixed
+- the evaluator should not shuffle or sample internally
+
+This matches the paper’s deterministic reporting style and ensures the ensemble results are traceable.
+
+---
+
+## 11) Expected integration points
+
+This module will be used after training and inference by `main.py`:
+
+1. train 15 seeds
+2. collect test predictions
+3. pass them to `EnsembleEvaluator`
+4. obtain ensemble metrics
+5. log results alongside single-model metrics and baselines
+
+It should also work in the DL-vs-GBDT comparison setting where ensemble performance is reported separately from single-model performance.
+
+---
+
+## 12) Final implementation intent
+
+`evaluation/ensemble.py` should implement a clean, deterministic, paper-faithful ensemble evaluator that:
+
+- assumes exactly 15 seed-level predictions
+- creates 3 ensembles of 5 models each
+- averages predictions within each ensemble
+- computes accuracy or RMSE through `evaluation.metrics`
+- returns a structured summary suitable for the experiment logger
+
+This keeps the module narrowly focused and fully aligned with the paper and `config.yaml`.

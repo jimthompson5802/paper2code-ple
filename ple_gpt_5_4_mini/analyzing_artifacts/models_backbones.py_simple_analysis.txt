@@ -1,0 +1,476 @@
+## Logic Analysis: `models/backbones.py`
+
+This module must implement the three backbone families used throughout the paper:
+
+- `MLPBackbone`
+- `ResNetBackbone`
+- `TransformerBackbone`
+
+It must be compatible with the embedding interface defined in `models/embeddings.py` and with the model composition logic in `models/tabular_model.py`.
+
+The paper’s methodology and `config.yaml` constrain this module tightly:
+- backbones must accept either:
+  - a single flattened tensor for MLP-like models, or
+  - a sequence of feature tokens for Transformer-style models
+- hyperparameters must align with the search spaces in `config.yaml`
+- no learning rate schedule or other hidden training behavior belongs here
+- the backbone classes should be purely architectural components, not training logic
+
+---
+
+# 1) Role of this file in the system
+
+`models/backbones.py` defines the reusable neural network cores for tabular prediction:
+
+1. **MLPBackbone**
+   - used for MLP-based models
+   - receives a single flat vector, typically the concatenation of embedded numerical features and possibly categorical features already encoded upstream
+   - outputs a prediction-ready latent representation or final logits/regression output, depending on composition design
+
+2. **ResNetBackbone**
+   - tabular residual network variant from the Gorishniy et al. benchmark family
+   - same input style as MLP: flat vector
+   - uses residual blocks with dropout and a multiplicative hidden expansion factor
+
+3. **TransformerBackbone**
+   - FT-Transformer style backbone
+   - receives tokenized feature embeddings
+   - processes them with self-attention across features
+   - outputs a pooled representation for the head
+
+This file should not:
+- preprocess raw data
+- perform embedding binning
+- handle target scaling
+- implement training loops
+- manage metrics or tuning
+
+Those responsibilities are elsewhere.
+
+---
+
+# 2) Interface expectations from the design
+
+The design explicitly states:
+
+- `MLPBackbone`
+  - `__init__(input_dim: int, hidden_dim: int, num_layers: int, dropout: float)`
+  - `forward(x: torch.Tensor) -> torch.Tensor`
+
+- `ResNetBackbone`
+  - `__init__(input_dim: int, hidden_dim: int, num_layers: int, hidden_factor: float, dropout: float)`
+  - `forward(x: torch.Tensor) -> torch.Tensor`
+
+- `TransformerBackbone`
+  - `__init__(num_tokens: int, emb_dim: int, n_layers: int, n_heads: int, ffn_factor: float, dropout: float)`
+  - `forward(x: torch.Tensor) -> torch.Tensor`
+
+Important implementation constraint:
+- do not add public methods beyond this design
+- internal helper methods are fine if kept private
+
+---
+
+# 3) Input/output contract
+
+## 3.1 MLPBackbone input contract
+Expected input:
+- `x`: shape `[batch_size, input_dim]`
+
+This will usually be produced by `TabularModel` after concatenating per-feature numerical embeddings, or by a simple embedding stack that already flattens tokens.
+
+Expected output:
+- latent vector of shape `[batch_size, hidden_dim]` or final hidden representation
+- the exact final prediction head is handled by `models/tabular_model.py`, so the backbone should generally return the final hidden representation, not task logits directly
+
+Rationale:
+- the paper composes backbones with heads
+- the backbone should remain reusable across classification/regression tasks
+
+## 3.2 ResNetBackbone input contract
+Expected input:
+- `x`: shape `[batch_size, input_dim]`
+
+Expected output:
+- latent vector shape `[batch_size, hidden_dim]` or same base width used by the head
+
+The residual architecture should preserve a stable latent width through residual blocks. If the first projection changes dimensionality, it should do so once at the input stage.
+
+## 3.3 TransformerBackbone input contract
+Expected input:
+- `x`: shape `[batch_size, num_tokens, emb_dim]`
+
+This matches FT-Transformer-style token input:
+- each numerical feature embedding is a token
+- categorical tokens may also be included if the broader model supports them, but the paper’s focus is numerical embeddings
+- token order matters only because a positional/feature-index mechanism is already represented in the embeddings or token structure
+
+Expected output:
+- pooled latent vector shape `[batch_size, emb_dim]` or compatible hidden width for the downstream head
+
+The backbone should therefore:
+- process tokens through transformer blocks
+- pool across tokens into a single representation
+
+---
+
+# 4) Paper-faithful architectural logic
+
+## 4.1 MLPBackbone
+The paper compares MLP-like models with different numerical embeddings and shows that proper embeddings can make MLP competitive with Transformer-based models.
+
+For faithful reproduction:
+- use a straightforward feed-forward stack
+- each layer should follow the common tabular benchmark style:
+  - linear projection
+  - activation
+  - dropout
+- the backbone should not introduce any extra feature mixing beyond standard dense layers
+
+### Architecture logic
+A typical hidden pipeline is:
+
+1. input projection from `input_dim` to `hidden_dim`
+2. repeat `num_layers - 1` hidden blocks
+3. each hidden block:
+   - linear
+   - activation
+   - dropout
+
+The paper does not specify a novel MLP activation in this file; use the standard activation used by the benchmark codebase if that is already fixed elsewhere. Since the design does not expose an activation hyperparameter here, the module should follow the benchmark’s default MLP choice consistently.
+
+### Important note
+The paper’s model naming distinguishes embeddings from backbones:
+- `MLP-LR` means an embedding module containing linear/relu layers before the MLP
+- the MLP backbone itself should remain the same regardless of embedding type
+
+So this backbone must be embedding-agnostic.
+
+---
+
+## 4.2 ResNetBackbone
+The paper follows the tabular ResNet style from Gorishniy et al.
+
+The residual architecture should:
+- first map input features to a working hidden width
+- then apply residual blocks with hidden expansion controlled by `hidden_factor`
+- use dropout inside blocks as prescribed by the tuned hyperparameters
+
+### Residual block logic
+Each residual block should conceptually:
+1. normalize or transform input representation
+2. expand hidden width to `hidden_dim * hidden_factor`
+3. apply nonlinearity
+4. project back to `hidden_dim`
+5. apply dropout
+6. add residual connection
+
+Because the design does not expose a separate normalization class in this file, the implementation should remain consistent with the benchmark style but stay within the allowed interface. If normalization is used, it should be internal to the module.
+
+### Shape logic
+- input tensor `[B, input_dim]`
+- projected to `[B, hidden_dim]`
+- residual blocks preserve `[B, hidden_dim]`
+
+### Why this matters
+The paper’s ResNet comparison is important because it shows embeddings improve not only MLPs but also a stronger tabular backbone. So the ResNet implementation must be stable and standard, not a modified experimental variant.
+
+---
+
+## 4.3 TransformerBackbone
+This backbone is the most structurally constrained because the paper uses FT-Transformer-like behavior.
+
+### Required behavior
+- process feature tokens independently at input
+- mix them with self-attention blocks
+- use dropout values from config
+- use feed-forward expansion with factor `ffn_factor`
+- output a pooled representation over feature tokens
+
+### Input structure
+The backbone expects a token sequence:
+- shape `[B, T, D]`
+where:
+- `B` = batch size
+- `T` = number of tokens / features
+- `D` = embedding dimension
+
+### Output structure
+Most likely one pooled vector:
+- `[B, D]`
+
+Pooling should be consistent with FT-Transformer convention:
+- either a dedicated CLS token if the composition module provides it
+- or a simple pooling strategy if the benchmark code does not use CLS
+
+Since the design for this module only exposes `num_tokens`, `emb_dim`, `n_layers`, `n_heads`, `ffn_factor`, and `dropout`, the safer assumption is:
+- the backbone itself should handle the standard FT-Transformer processing of tokens and return a single latent representation
+- any final prediction head is separate in `models/tabular_model.py`
+
+### Attention logic
+Each layer should include:
+- multi-head self-attention
+- residual connection
+- feed-forward network using `ffn_factor`
+- dropout
+
+The `num_tokens` argument is needed to support the token count in the module, but the forward pass should primarily infer batch dimensions from input.
+
+### Note on numerical embeddings
+The paper emphasizes that embeddings are computed independently per feature before mixing. Therefore:
+- `TransformerBackbone` should not perform any per-feature embedding itself
+- it only receives the already-embedded tokens from upstream modules
+
+---
+
+# 5) Hyperparameter alignment with `config.yaml`
+
+The backbone module must respect the following config-driven ranges.
+
+## 5.1 MLP
+From `config.yaml`:
+- `layers`: `[1, 16]`
+- `layer_size`: `[1, 1024]`
+- `dropout`: `[0.0, 0.5]`
+- `weight_decay`: `[0.0, 1.0e-03]`
+
+In this file:
+- `layers`, `layer_size`, and `dropout` are architectural parameters
+- `weight_decay` is handled by the optimizer/training logic, not here
+
+So `MLPBackbone` should be parameterized to accept:
+- the number of layers
+- hidden size
+- dropout
+and should remain compatible with the ranges above.
+
+## 5.2 ResNet
+From `config.yaml`:
+- `layers`: `[1, 8]`
+- `layer_size`: `[32, 512]`
+- `hidden_factor`: `[1.0, 4.0]`
+- `hidden_dropout`: `[0.0, 0.5]`
+- `residual_dropout`: `[0.0, 0.5]`
+- `weight_decay`: `[0.0, 1.0e-03]`
+
+This means:
+- `hidden_dim` should match the tunable layer size
+- `hidden_factor` must be used in the residual block expansion
+- `dropout` in the design likely needs to cover the relevant dropout usage; if the implementation supports both hidden and residual dropout internally, it should keep them separate internally only if this does not violate the exposed interface
+- `weight_decay` is not part of the backbone
+
+Since the design signature only has one `dropout` argument, the implementation must map the configured dropout behavior into this single parameter consistently with the design, without adding new public constructor args.
+
+## 5.3 Transformer
+From `config.yaml`:
+- `layers`:
+  - `sa_co_mi`: `[2, 4]`
+  - `other`: `[1, 4]`
+- `embedding_size`:
+  - `sa_co_mi`: `[192, 512]`
+  - `other`: `[96, 512]`
+- `residual_dropout`:
+  - `sa_co_mi`: `0.0`
+  - `other`: `[0.0, 0.2]`
+- `attention_dropout`: `[0.0, 0.5]`
+- `ffn_dropout`: `[0.0, 0.5]`
+- `ffn_factor`: `[0.6666667, 2.6666667]`
+- `weight_decay`: dataset-dependent
+
+This implies `TransformerBackbone` must be compatible with:
+- dataset-dependent number of layers
+- dataset-dependent embedding dimension
+- attention and FFN dropout
+- FFN expansion ratio
+
+The design exposes only one `dropout` argument, so the internal implementation must either:
+- interpret it as the shared dropout value used by attention and/or FFN, or
+- internally route it to the relevant dropout locations while keeping the public interface unchanged
+
+You must not add extra constructor arguments beyond the design.
+
+---
+
+# 6) Token handling for TransformerBackbone
+
+The paper’s transformer models are the FT-Transformer family. The key principles are:
+
+1. each numerical feature is embedded independently
+2. embeddings are treated as tokens
+3. self-attention mixes tokens
+4. the backbone itself does not create embeddings from raw scalars
+
+This file should therefore assume that:
+- upstream embedding code already produced feature tokens
+- token order is stable and consistent across samples
+- there is no need for additional manual feature mixing inside the backbone input stage
+
+Potential output pooling strategies:
+- CLS token if provided externally by model composition
+- otherwise, pooled token summary
+
+The exact pooling convention must be consistent with the rest of the codebase and the benchmark style, but it should not require public API changes here.
+
+---
+
+# 7) Internal class decomposition
+
+Even though only three public classes are exposed, the implementation should likely use internal helper modules for clarity and correctness.
+
+## Suggested internal helpers
+These should remain private/internal to the file:
+
+- `_MLPBlock`
+- `_ResidualBlock`
+- `_TransformerBlock`
+
+These internal blocks can encapsulate:
+- linear layers
+- normalization
+- activation
+- dropout
+- attention/FFN sublayers
+
+This keeps the public API clean and aligned with the design.
+
+---
+
+# 8) Dependency relationships with other modules
+
+## 8.1 Dependency on `models/embeddings.py`
+`backbones.py` must be compatible with embedding outputs:
+- `LinearEmbedding` and PLE variants may output flattened vectors for MLP/ResNet
+- Transformer-compatible embeddings may output token sequences
+
+Therefore, the backbone module must be shape-flexible:
+- accept flat vectors for MLP/ResNet
+- accept token tensors for Transformer
+
+## 8.2 Dependency on `models/tabular_model.py`
+`TabularModel` is responsible for composing embedding + backbone + head.
+
+So `backbones.py` must not:
+- decide task type
+- create final output heads
+- apply sigmoid/softmax
+- compute loss
+
+It should only emit latent features.
+
+## 8.3 Dependency on `training/trainer.py`
+Trainer will:
+- call the model
+- compute losses
+- handle early stopping
+- run optimization
+
+The backbone must be deterministic under seed control and suitable for repeated instantiation across 15 seeds.
+
+---
+
+# 9) Reproducibility concerns
+
+The paper requires careful reproducibility, so `backbones.py` should avoid hidden nondeterminism where possible.
+
+Important points:
+- use standard PyTorch modules only
+- dropout should be the only intentional stochastic component
+- initialization should follow PyTorch defaults unless benchmark code requires otherwise
+- no internal randomness beyond layer initialization and dropout
+
+Since `utils/reproducibility.py` will set seeds, the backbone should be deterministic given those seeds.
+
+---
+
+# 10) Shape and failure-mode checks
+
+This module should be designed to fail loudly and clearly if the wrong tensor shape is passed.
+
+## MLPBackbone
+Expect:
+- 2D tensor `[B, D]`
+
+If a 3D tensor is passed accidentally, that indicates embedding composition mismatch.
+
+## ResNetBackbone
+Same expectation as MLP:
+- 2D tensor `[B, D]`
+
+## TransformerBackbone
+Expect:
+- 3D tensor `[B, T, D]`
+
+If a flattened tensor is passed here, that indicates the model factory or embedding composition is incorrect.
+
+These checks are important because embedding backbones are easy to wire incorrectly in tabular systems.
+
+---
+
+# 11) Alignment with the paper’s experimental intent
+
+The paper’s experiments rely on comparing backbone behavior under different embedding schemes. Therefore this file should be intentionally conservative:
+
+- MLP and ResNet should be standard, benchmark-style tabular networks
+- Transformer should be FT-Transformer-like and token-based
+- no experimental extras should be introduced here
+- do not bake in dataset-specific logic
+- do not bake in embedding-specific logic
+- do not hard-code model names like `MLP-Q-LR`; that belongs in `models/tabular_model.py`
+
+The purpose of this file is to provide the backbone primitives so the rest of the reproduction can mix and match embeddings exactly as in the paper.
+
+---
+
+# 12) Practical implementation order
+
+Within `models/backbones.py`, implement in this order:
+
+1. `MLPBackbone`
+   - simplest
+   - validates flat-vector pipeline
+
+2. `ResNetBackbone`
+   - uses shared conventions with MLP
+   - residual block internal helper
+
+3. `TransformerBackbone`
+   - most complex
+   - requires attention/FFN blocks and token pooling
+
+This order reduces debugging complexity because the composition layer can first be validated with MLP before moving to residual and transformer pipelines.
+
+---
+
+# 13) Summary of key constraints
+
+## Must follow
+- public API exactly as designed
+- flat input for MLP/ResNet
+- token input for Transformer
+- no public methods beyond design
+- architecture compatible with paper’s benchmark setup
+- hidden size / layer counts / dropout behavior consistent with `config.yaml`
+
+## Must not do
+- do not add preprocessing
+- do not add loss/metric logic
+- do not add tuning logic
+- do not add dataset-specific code
+- do not mix numerical features inside the backbone
+- do not assume extra config values not present in `config.yaml`
+
+---
+
+# 14) Final implementation intent
+
+`models/backbones.py` should be a clean, minimal, reproducible implementation of three standard tabular backbones, designed to plug into the paper’s embedding experiments:
+
+- `MLPBackbone` for flattened embeddings
+- `ResNetBackbone` for residual tabular modeling
+- `TransformerBackbone` for FT-Transformer-style token processing
+
+It should be written to support the paper’s core comparisons:
+- vanilla embeddings vs PLE vs periodic embeddings
+- MLP vs ResNet vs Transformer
+- consistent performance evaluation across the 11 datasets and 15 seeds
+

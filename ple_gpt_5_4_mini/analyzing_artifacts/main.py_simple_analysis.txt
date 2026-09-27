@@ -1,0 +1,424 @@
+### main.py Logic Analysis
+
+`main.py` is the top-level orchestration entrypoint for reproducing the paper’s experiments. It must glue together configuration loading, reproducibility setup, data preparation, optional tuning, training, evaluation, ensembling, and optional GBDT baselines.
+
+This file should **not** implement modeling logic itself; it should only coordinate the modules defined in the design and ensure every run follows the paper’s protocol and `config.yaml`.
+
+---
+
+## 1) Responsibilities of `main.py`
+
+`main.py` should perform the following in order:
+
+1. Load the experiment configuration from `config.yaml`
+2. Set global seeds and deterministic behavior
+3. Load the dataset and construct train/validation/test splits
+4. Apply preprocessing according to dataset and model type
+5. Optionally run Optuna hyperparameter tuning
+6. Train the selected model using the best configuration
+7. Repeat training/evaluation for the required number of seeds
+8. Compute test metrics using the unified evaluator
+9. Optionally build 3 ensembles from the 15 seed runs
+10. Optionally run CatBoost/XGBoost baselines
+11. Save all outputs: configs, tuned parameters, metrics, predictions, and summaries
+
+---
+
+## 2) Configuration-driven control flow
+
+`main.py` must rely on `config.yaml` and never hardcode values that are specified there.
+
+Important config values to use:
+
+- `experiment.seed = 42`
+- `experiment.num_seeds = 15`
+- `experiment.num_ensembles = 3`
+- `experiment.ensemble_group_size = 5`
+- `training.optimizer = adamw`
+- `training.loss.classification = cross_entropy`
+- `training.loss.regression = mse`
+- `training.early_stopping.patience = 16`
+- `training.early_stopping.min_delta = 0.0`
+- `training.lr_schedule = none`
+- `training.max_epochs = 100`
+- `hyperparameter_tuning.method = optuna_tpe`
+- `hyperparameter_tuning.trials = 100`
+
+It also must use dataset-specific settings from the config:
+
+- preprocessing policy by dataset
+- batch size by dataset
+- transformer search spaces by dataset group
+- baseline hyperparameter ranges
+
+---
+
+## 3) Inputs expected by `main.py`
+
+`main.py` should assume the runtime receives at least:
+
+- path to `config.yaml`
+- dataset name
+- model name
+- task type
+- optional flags for:
+  - tuning on/off
+  - ensemble evaluation on/off
+  - baseline runs on/off
+
+The exact CLI interface is not specified in the design, so `main.py` should remain simple and accept a minimal experiment-run specification consistent with the config schema.
+
+---
+
+## 4) Required orchestration steps
+
+### Step 1: Load config
+Use `utils.io.load_config(path)` to parse `config.yaml` into a structured experiment config object or dictionary.
+
+The config must remain the source of truth for:
+- dataset preprocessing
+- training hyperparameters
+- tuning search spaces
+- evaluation settings
+- baseline settings
+
+---
+
+### Step 2: Set reproducibility state
+Before any stochastic operation:
+
+- call `utils.reproducibility.set_seed(config.experiment.seed)`
+- call `utils.reproducibility.set_deterministic()`
+- resolve device through `utils.reproducibility.get_device(config.device)` or equivalent config field
+
+This is required before:
+- dataset splitting
+- preprocessing fitting
+- tuning
+- model initialization
+- training
+- baseline fitting
+
+---
+
+### Step 3: Load and split dataset
+Instantiate `DatasetLoader` from `data/dataset_loader.py`.
+
+Call:
+- `load_raw()`
+- `split_data(df)` or `load_and_split()`
+
+The loader must return:
+- train/validation/test partitions
+- numerical and categorical column lists
+- dataset metadata needed downstream
+
+`main.py` must not bypass the loader.
+
+---
+
+### Step 4: Preprocess data
+Instantiate `Preprocessor` from `data/preprocessing.py`.
+
+Call:
+- `fit_transform(splits)` for training-time setup
+- or `fit()` then `transform()` if reuse is needed
+
+The preprocessing behavior must follow `config.yaml` and the paper:
+
+- numerical:
+  - default: quantile transform
+  - Otto Group Product Classification: none
+- categorical:
+  - default: one-hot
+- regression targets:
+  - standardized
+
+This preprocessing must be shared across all deep models for a given dataset.
+
+---
+
+### Step 5: Optional tuning
+If tuning is enabled for the current experiment, `main.py` must:
+
+1. Instantiate `training.tuning.Tuner`
+2. Run Optuna TPE with `hyperparameter_tuning.trials = 100`
+3. Tune only on validation performance
+4. Select the best configuration by validation metric
+
+The tuner must use the correct search spaces from `config.yaml`, including:
+
+- MLP:
+  - layers
+  - layer size
+  - dropout
+  - weight decay
+  - learning rate
+- ResNet:
+  - layers
+  - layer size
+  - hidden factor
+  - hidden dropout
+  - residual dropout
+  - weight decay
+  - learning rate
+- Transformer:
+  - dataset-group dependent layers, embedding size, residual dropout, weight decay
+  - attention dropout
+  - FFN dropout
+  - FFN factor
+  - learning rate
+- Embedding-specific tuning:
+  - linear embedding output dim
+  - PLE quantiles
+  - PLE tree parameters
+  - periodic k
+
+`main.py` should pass the dataset name and model name so the tuner can select the correct space.
+
+---
+
+### Step 6: Build model from factory
+After tuning, or directly if tuning is disabled, `main.py` should call:
+
+- `models.tabular_model.ModelFactory.create(...)`
+
+This factory must interpret the model naming convention, such as:
+
+- `MLP`
+- `MLP-LR`
+- `MLP-Q-LR`
+- `Transformer-T-LR`
+- `ResNet-PLR`
+
+`main.py` should not map model strings manually if the factory already encapsulates this logic.
+
+---
+
+### Step 7: Train the model
+Use `training.trainer.Trainer`.
+
+The trainer must:
+- use AdamW
+- use the loss function appropriate for the task
+- train for at most `training.max_epochs = 100`
+- apply early stopping with `patience = 16`
+- use `min_delta = 0.0`
+- use no LR schedule
+- checkpoint the best validation model
+
+`main.py` should invoke training once per seed.
+
+---
+
+### Step 8: Repeat over 15 seeds
+Per `config.yaml`, each tuned configuration must be evaluated over:
+
+- `experiment.num_seeds = 15`
+
+Therefore `main.py` should:
+1. generate or iterate over 15 seeds
+2. set the seed before each run
+3. retrain the best configuration
+4. collect test predictions and metrics
+5. aggregate mean/std across runs
+
+This is essential to match the paper’s reporting protocol.
+
+---
+
+### Step 9: Compute metrics
+Use `evaluation.metrics.MetricsEvaluator`.
+
+It must compute:
+- classification: accuracy
+- regression: RMSE
+
+`main.py` should:
+- use the validation metric during tuning
+- use the test metric for final reporting
+- keep the metric consistent with the task type
+
+For Microsoft ranking data, the paper treats the task as regression; `main.py` should follow the config’s `task_type` rather than inventing special handling.
+
+---
+
+### Step 10: Ensemble evaluation
+If ensemble evaluation is enabled:
+
+- `experiment.num_ensembles = 3`
+- `experiment.ensemble_group_size = 5`
+
+`main.py` should gather the 15 seed-level predictions and pass them to `evaluation.ensemble.EnsembleEvaluator`.
+
+The evaluator must:
+- partition the 15 models into 3 disjoint groups of 5
+- average predictions within each group
+- compute ensemble metrics
+
+`main.py` should then save both:
+- per-seed metrics
+- ensemble metrics
+
+---
+
+### Step 11: Optional GBDT baselines
+If baseline evaluation is enabled, `main.py` should invoke:
+
+- `baselines.gbdt.GBDDBaselineRunner.run_catboost(...)`
+- `baselines.gbdt.GBDDBaselineRunner.run_xgboost(...)`
+
+The baselines must respect config settings:
+
+#### CatBoost
+Use fixed values:
+- `early_stopping_rounds = 50`
+- `od_pval = 0.001`
+- `iterations = 2000`
+
+Tune:
+- `max_depth`
+- `learning_rate`
+- `bagging_temperature`
+- `l2_leaf_reg`
+- `leaf_estimation_iterations`
+
+#### XGBoost
+Use fixed values:
+- `booster = gbtree`
+- `early_stopping_rounds = 50`
+- `n_estimators = 2000`
+
+Tune:
+- `max_depth`
+- `min_child_weight`
+- `subsample`
+- `learning_rate`
+- `colsample_bytree`
+- `gamma`
+- `lambda`
+
+`main.py` should not duplicate baseline tuning logic.
+
+---
+
+## 5) Output artifacts to save
+
+`main.py` should save reproducible artifacts using `utils.io`:
+
+- resolved config
+- best hyperparameters
+- per-seed metrics
+- ensemble metrics
+- baseline metrics
+- predictions if needed for ensembling or later inspection
+- run metadata such as dataset, model, seed list, device
+
+This is important for paper-style reproducibility and debugging.
+
+Suggested outputs:
+- JSON summary files for metrics
+- pickle files for tuned configs or prediction arrays
+- checkpoints for best model weights
+- logs for tuning and training progress
+
+---
+
+## 6) Control flow structure
+
+A clean orchestration pattern for `main.py` is:
+
+1. parse config and runtime args
+2. set reproducibility
+3. load raw data
+4. split data
+5. preprocess data
+6. optionally tune
+7. for each seed in 15 seeds:
+   - reset seed
+   - build model
+   - train model
+   - evaluate on test
+   - store predictions and metric
+8. aggregate mean/std
+9. optionally ensemble
+10. optionally run baselines
+11. save all results
+
+---
+
+## 7) Important invariants from the paper
+
+`main.py` must enforce these paper constraints:
+
+- test set is never used in tuning
+- preprocessing is consistent across deep models for a dataset
+- Otto has no feature preprocessing
+- regression targets are standardized
+- no learning-rate schedules
+- early stopping patience is 16
+- 15 runs per tuned configuration
+- feature embeddings are handled per feature, not by mixing raw numerical inputs
+- evaluation metric follows task type
+- CatBoost and XGBoost comparisons should use the same data splits and target preprocessing
+
+---
+
+## 8) What `main.py` should not do
+
+`main.py` should avoid implementing:
+
+- binning logic for PLE
+- periodic embedding math
+- backbone layer definitions
+- metric formulas
+- optimizer internals
+- preprocessing transformer details
+
+Those belong in their dedicated modules.
+
+---
+
+## 9) Minimal dependency map
+
+`main.py` depends on:
+
+- `utils.io`
+- `utils.reproducibility`
+- `data.dataset_loader`
+- `data.preprocessing`
+- `models.tabular_model`
+- `training.tuner`
+- `training.trainer`
+- `evaluation.metrics`
+- `evaluation.ensemble`
+- `baselines.gbdt`
+
+It should coordinate them in that order.
+
+---
+
+## 10) Reproduction fidelity notes
+
+A faithful `main.py` should preserve the paper’s experiment hierarchy:
+
+- first tune on validation
+- then retrain/evaluate across 15 seeds
+- then optionally ensemble
+- then optionally run GBDT baselines
+
+If there is any ambiguity in dataset splits or Microsoft fold handling, `main.py` should defer to the dataset loader rather than embedding custom logic.
+
+---
+
+## 11) Final implementation intent
+
+`main.py` is the experiment conductor. Its correctness is measured by whether it can reproduce the paper’s full protocol end-to-end with minimal user interaction and without violating any config or design constraint.
+
+The entrypoint should make the entire system usable as a single command for:
+
+- baseline DL experiments
+- embedding ablations
+- ensemble comparisons
+- GBDT comparisons
+- reproducible reporting across all 11 datasets

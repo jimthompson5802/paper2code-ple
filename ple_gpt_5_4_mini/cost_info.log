@@ -1,0 +1,300 @@
+🌟 Usage Summary 🌟
+[Planning] Overall plan
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 370 (Cost: $0.00027750)
+📦 Cached input tokens: 22784 (Cost: $0.00170880)
+📤 Output tokens: 4534 (Cost: $0.02040300)
+💵 Current total cost: $0.02238930
+🪙 Accumulated total cost so far: $0.02238930
+============================================
+
+🌟 Usage Summary 🌟
+[Planning] Architecture design
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 998 (Cost: $0.00074850)
+📦 Cached input tokens: 27392 (Cost: $0.00205440)
+📤 Output tokens: 2669 (Cost: $0.01201050)
+💵 Current total cost: $0.01481340
+🪙 Accumulated total cost so far: $0.03720270
+============================================
+
+🌟 Usage Summary 🌟
+[Planning] Logic design
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 1276 (Cost: $0.00095700)
+📦 Cached input tokens: 30464 (Cost: $0.00228480)
+📤 Output tokens: 1794 (Cost: $0.00807300)
+💵 Current total cost: $0.01131480
+🪙 Accumulated total cost so far: $0.04851750
+============================================
+
+🌟 Usage Summary 🌟
+[Planning] Configuration file generation
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 683 (Cost: $0.00051225)
+📦 Cached input tokens: 33024 (Cost: $0.00247680)
+📤 Output tokens: 1080 (Cost: $0.00486000)
+💵 Current total cost: $0.00784905
+🪙 Accumulated total cost so far: $0.05636655
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] utils/reproducibility.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 10569 (Cost: $0.00792675)
+📦 Cached input tokens: 22784 (Cost: $0.00170880)
+📤 Output tokens: 1520 (Cost: $0.00684000)
+💵 Current total cost: $0.01647555
+🪙 Accumulated total cost so far: $0.07284210
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] utils/io.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 329 (Cost: $0.00024675)
+📦 Cached input tokens: 33024 (Cost: $0.00247680)
+📤 Output tokens: 3446 (Cost: $0.01550700)
+💵 Current total cost: $0.01823055
+🪙 Accumulated total cost so far: $0.09107265
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] data/dataset_loader.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 378 (Cost: $0.00028350)
+📦 Cached input tokens: 33024 (Cost: $0.00247680)
+📤 Output tokens: 2169 (Cost: $0.00976050)
+💵 Current total cost: $0.01252080
+🪙 Accumulated total cost so far: $0.10359345
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] data/preprocessing.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 356 (Cost: $0.00026700)
+📦 Cached input tokens: 33024 (Cost: $0.00247680)
+📤 Output tokens: 2741 (Cost: $0.01233450)
+💵 Current total cost: $0.01507830
+🪙 Accumulated total cost so far: $0.11867175
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] models/embeddings.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 371 (Cost: $0.00027825)
+📦 Cached input tokens: 33024 (Cost: $0.00247680)
+📤 Output tokens: 4187 (Cost: $0.01884150)
+💵 Current total cost: $0.02159655
+🪙 Accumulated total cost so far: $0.14026830
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] models/backbones.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 331 (Cost: $0.00024825)
+📦 Cached input tokens: 33024 (Cost: $0.00247680)
+📤 Output tokens: 3750 (Cost: $0.01687500)
+💵 Current total cost: $0.01960005
+🪙 Accumulated total cost so far: $0.15986835
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] models/tabular_model.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 349 (Cost: $0.00026175)
+📦 Cached input tokens: 33024 (Cost: $0.00247680)
+📤 Output tokens: 3555 (Cost: $0.01599750)
+💵 Current total cost: $0.01873605
+🪙 Accumulated total cost so far: $0.17860440
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] training/trainer.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 354 (Cost: $0.00026550)
+📦 Cached input tokens: 33024 (Cost: $0.00247680)
+📤 Output tokens: 2254 (Cost: $0.01014300)
+💵 Current total cost: $0.01288530
+🪙 Accumulated total cost so far: $0.19148970
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] training/tuning.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 351 (Cost: $0.00026325)
+📦 Cached input tokens: 33024 (Cost: $0.00247680)
+📤 Output tokens: 3250 (Cost: $0.01462500)
+💵 Current total cost: $0.01736505
+🪙 Accumulated total cost so far: $0.20885475
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] evaluation/metrics.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 310 (Cost: $0.00023250)
+📦 Cached input tokens: 33024 (Cost: $0.00247680)
+📤 Output tokens: 1845 (Cost: $0.00830250)
+💵 Current total cost: $0.01101180
+🪙 Accumulated total cost so far: $0.21986655
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] evaluation/ensemble.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 312 (Cost: $0.00023400)
+📦 Cached input tokens: 33024 (Cost: $0.00247680)
+📤 Output tokens: 1698 (Cost: $0.00764100)
+💵 Current total cost: $0.01035180
+🪙 Accumulated total cost so far: $0.23021835
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] baselines/gbdt.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 340 (Cost: $0.00025500)
+📦 Cached input tokens: 33024 (Cost: $0.00247680)
+📤 Output tokens: 2310 (Cost: $0.01039500)
+💵 Current total cost: $0.01312680
+🪙 Accumulated total cost so far: $0.24334515
+============================================
+
+🌟 Usage Summary 🌟
+[ANALYSIS] main.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 335 (Cost: $0.00025125)
+📦 Cached input tokens: 33024 (Cost: $0.00247680)
+📤 Output tokens: 2586 (Cost: $0.01163700)
+💵 Current total cost: $0.01436505
+🪙 Accumulated total cost so far: $0.25771020
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] utils/reproducibility.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 34877 (Cost: $0.02615775)
+📦 Cached input tokens: 0 (Cost: $0.00000000)
+📤 Output tokens: 879 (Cost: $0.00395550)
+💵 Current total cost: $0.03011325
+🪙 Accumulated total cost so far: $0.28782345
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] utils/io.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 5164 (Cost: $0.00387300)
+📦 Cached input tokens: 32512 (Cost: $0.00243840)
+📤 Output tokens: 3252 (Cost: $0.01463400)
+💵 Current total cost: $0.02094540
+🪙 Accumulated total cost so far: $0.30876885
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] data/dataset_loader.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 6126 (Cost: $0.00459450)
+📦 Cached input tokens: 33536 (Cost: $0.00251520)
+📤 Output tokens: 4963 (Cost: $0.02233350)
+💵 Current total cost: $0.02944320
+🪙 Accumulated total cost so far: $0.33821205
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] data/preprocessing.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 8590 (Cost: $0.00644250)
+📦 Cached input tokens: 36608 (Cost: $0.00274560)
+📤 Output tokens: 4941 (Cost: $0.02223450)
+💵 Current total cost: $0.03142260
+🪙 Accumulated total cost so far: $0.36963465
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] models/embeddings.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 9865 (Cost: $0.00739875)
+📦 Cached input tokens: 41728 (Cost: $0.00312960)
+📤 Output tokens: 6178 (Cost: $0.02780100)
+💵 Current total cost: $0.03832935
+🪙 Accumulated total cost so far: $0.40796400
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] models/backbones.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 10487 (Cost: $0.00786525)
+📦 Cached input tokens: 46848 (Cost: $0.00351360)
+📤 Output tokens: 2942 (Cost: $0.01323900)
+💵 Current total cost: $0.02461785
+🪙 Accumulated total cost so far: $0.43258185
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] models/tabular_model.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 7098 (Cost: $0.00532350)
+📦 Cached input tokens: 52992 (Cost: $0.00397440)
+📤 Output tokens: 5568 (Cost: $0.02505600)
+💵 Current total cost: $0.03435390
+🪙 Accumulated total cost so far: $0.46693575
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] training/trainer.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 8294 (Cost: $0.00622050)
+📦 Cached input tokens: 56064 (Cost: $0.00420480)
+📤 Output tokens: 5570 (Cost: $0.02506500)
+💵 Current total cost: $0.03549030
+🪙 Accumulated total cost so far: $0.50242605
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] training/tuning.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 9744 (Cost: $0.00730800)
+📦 Cached input tokens: 61184 (Cost: $0.00458880)
+📤 Output tokens: 6005 (Cost: $0.02702250)
+💵 Current total cost: $0.03891930
+🪙 Accumulated total cost so far: $0.54134535
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] evaluation/metrics.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 9228 (Cost: $0.00692100)
+📦 Cached input tokens: 66304 (Cost: $0.00497280)
+📤 Output tokens: 1726 (Cost: $0.00776700)
+💵 Current total cost: $0.01966080
+🪙 Accumulated total cost so far: $0.56100615
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] evaluation/ensemble.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 4667 (Cost: $0.00350025)
+📦 Cached input tokens: 72448 (Cost: $0.00543360)
+📤 Output tokens: 2400 (Cost: $0.01080000)
+💵 Current total cost: $0.01973385
+🪙 Accumulated total cost so far: $0.58074000
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] baselines/gbdt.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 5643 (Cost: $0.00423225)
+📦 Cached input tokens: 74496 (Cost: $0.00558720)
+📤 Output tokens: 5403 (Cost: $0.02431350)
+💵 Current total cost: $0.03413295
+🪙 Accumulated total cost so far: $0.61487295
+============================================
+
+🌟 Usage Summary 🌟
+[CODING] main.py
+🛠️ Model: gpt-5.4-mini
+📥 Input tokens: 9265 (Cost: $0.00694875)
+📦 Cached input tokens: 76544 (Cost: $0.00574080)
+📤 Output tokens: 3529 (Cost: $0.01588050)
+💵 Current total cost: $0.02857005
+🪙 Accumulated total cost so far: $0.64344300
+============================================
+

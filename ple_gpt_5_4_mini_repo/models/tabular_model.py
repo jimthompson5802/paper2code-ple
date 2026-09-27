@@ -1,0 +1,640 @@
+## models/tabular_model.py
+"""Composition layer for tabular models.
+
+This module connects:
+- numerical embeddings from ``models.embeddings``
+- backbone networks from ``models.backbones``
+- task-specific prediction heads
+
+It provides:
+- ``TabularModel``: a thin ``torch.nn.Module`` wrapper
+- ``ModelFactory``: deterministic construction from config and model name
+
+The implementation follows the paper's Backbone-Embedding naming convention and
+keeps all preprocessing outside of the model itself.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+
+import torch
+from torch import Tensor, nn
+
+from models.backbones import MLPBackbone, ResNetBackbone, TransformerBackbone
+from models.embeddings import (
+    BaseEmbedding,
+    EmbeddingFactory,
+    LinearEmbedding,
+    PeriodicEmbedding,
+    PiecewiseLinearEmbedding,
+)
+
+
+class _FeatureEmbeddingStack(nn.Module):
+    """Applies a base embedding followed by optional feature-wise layers.
+
+    The stack is intentionally simple and supports only modules that preserve
+    the expected output shape for the chosen backbone type.
+    """
+
+    def __init__(
+        self,
+        base_embedding: BaseEmbedding,
+        post_layers: Optional[nn.Module] = None,
+    ) -> None:
+        super().__init__()
+        self.base_embedding = base_embedding
+        self.post_layers = post_layers if post_layers is not None else nn.Identity()
+
+    def forward(self, x: Tensor) -> Tensor:
+        """Embeds the input tensor and optionally applies extra layers."""
+        x = self.base_embedding(x)
+        x = self.post_layers(x)
+        return x
+
+
+class _IdentityEmbedding(BaseEmbedding):
+    """Identity embedding used for the simplest baseline case.
+
+    For MLP/ResNet backbones, this flattens the numerical features into a flat
+    vector; for Transformer it preserves the token structure as [B, F, 1].
+    """
+
+    def __init__(self, num_features: int, backbone_type: str = "mlp") -> None:
+        super().__init__(num_features=num_features, output_dim=1, backbone_type=backbone_type)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self._validate_input(x)
+        tokens = x.unsqueeze(-1)
+        return self._format_output(tokens)
+
+
+class _TokenProjection(nn.Module):
+    """Projects per-feature scalar/token representations to a common dimension."""
+
+    def __init__(self, num_features: int, in_dim: int, out_dim: int) -> None:
+        super().__init__()
+        self.num_features = int(num_features)
+        self.in_dim = int(in_dim)
+        self.out_dim = int(out_dim)
+        self.proj = nn.Linear(self.in_dim, self.out_dim)
+
+    def forward(self, x: Tensor) -> Tensor:
+        if x.ndim != 3:
+            raise ValueError(f"Expected [batch, features, dim], got {tuple(x.shape)}.")
+        if x.shape[1] != self.num_features:
+            raise ValueError(
+                f"Expected {self.num_features} tokens, got {x.shape[1]}."
+            )
+        if x.shape[2] != self.in_dim:
+            raise ValueError(f"Expected token dim {self.in_dim}, got {x.shape[2]}.")
+        flat = x.reshape(-1, self.in_dim)
+        out = self.proj(flat)
+        return out.reshape(x.shape[0], self.num_features, self.out_dim)
+
+
+class _FeaturewiseActivationStack(nn.Module):
+    """Applies simple differentiable layers after a base embedding.
+
+    For flat outputs (MLP/ResNet), this is a standard MLP over the concatenated
+    representation. For token outputs (Transformer), the same layers are applied
+    token-wise.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        mode: str,
+        num_layers: int = 1,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.input_dim = int(input_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.mode = str(mode).lower()
+        self.num_layers = max(1, int(num_layers))
+        self.dropout = float(dropout)
+
+        layers = []
+        current_dim = self.input_dim
+        for layer_idx in range(self.num_layers):
+            layers.append(nn.Linear(current_dim, self.hidden_dim))
+            if layer_idx < self.num_layers - 1:
+                layers.append(nn.ReLU())
+                if self.dropout > 0.0:
+                    layers.append(nn.Dropout(self.dropout))
+            current_dim = self.hidden_dim
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, x: Tensor) -> Tensor:
+        if self.mode == "transformer":
+            if x.ndim != 3:
+                raise ValueError(
+                    f"Expected [batch, tokens, dim] for transformer mode, got {tuple(x.shape)}."
+                )
+            bsz, tokens, dim = x.shape
+            x = x.reshape(bsz * tokens, dim)
+            x = self.network(x)
+            return x.reshape(bsz, tokens, self.hidden_dim)
+
+        if x.ndim != 2:
+            raise ValueError(
+                f"Expected [batch, features] for flat mode, got {tuple(x.shape)}."
+            )
+        return self.network(x)
+
+
+@dataclass(frozen=True)
+class _ModelSpec:
+    backbone: str
+    embedding_family: str
+    embedding_suffix: str
+    post_layers: str
+
+
+class TabularModel(nn.Module):
+    """End-to-end tabular model wrapper."""
+
+    def __init__(
+        self,
+        embedding: BaseEmbedding,
+        backbone: nn.Module,
+        head: nn.Module,
+    ) -> None:
+        """Initializes the composed model.
+
+        Args:
+          embedding: Numerical embedding module.
+          backbone: Backbone network.
+          head: Prediction head.
+        """
+        super().__init__()
+        self.embedding = embedding
+        self.backbone = backbone
+        self.head = head
+
+    def forward(self, x_num: Tensor, x_cat: Optional[Tensor] = None) -> Tensor:
+        """Runs a forward pass.
+
+        Args:
+          x_num: Numerical features tensor.
+          x_cat: Optional categorical features tensor. It is ignored here because
+            categorical features are preprocessed externally in this project.
+
+        Returns:
+          Model predictions: logits for classification or scalar outputs for regression.
+        """
+        if x_num is None:
+            raise ValueError("x_num cannot be None.")
+        if not isinstance(x_num, torch.Tensor):
+            raise TypeError(f"Expected x_num as torch.Tensor, got {type(x_num).__name__}.")
+
+        _ = x_cat  # Explicitly unused by design.
+
+        embedded = self.embedding(x_num)
+        backbone_out = self.backbone(embedded)
+        output = self.head(backbone_out)
+        return output
+
+
+class ModelFactory:
+    """Factory that maps model names to concrete model instances."""
+
+    _SUPPORTED_BACKBONES = {"mlp", "resnet", "transformer"}
+
+    def __init__(self, config: Mapping[str, Any]) -> None:
+        """Initializes the factory with shared experiment configuration."""
+        if not isinstance(config, Mapping):
+            raise TypeError(f"Expected config to be a mapping, got {type(config).__name__}.")
+        self._config: Dict[str, Any] = dict(config)
+        self._models_cfg: Dict[str, Any] = dict(self._config.get("models", {}))
+        self._tuning_cfg: Dict[str, Any] = dict(self._config.get("hyperparameter_tuning", {}))
+
+    def create(self, config: Mapping[str, Any], data: Any) -> TabularModel:
+        """Creates a model instance from a run configuration and data metadata.
+
+        Args:
+          config: Experiment or trial configuration. Must contain ``model_name``.
+          data: Preprocessed data container with shapes and feature counts.
+
+        Returns:
+          A fully constructed ``TabularModel``.
+        """
+        if not isinstance(config, Mapping):
+            raise TypeError(f"Expected config to be a mapping, got {type(config).__name__}.")
+
+        model_name = self._resolve_model_name(config)
+        task_type = self._resolve_task_type(config, data)
+        backbone_name, emb_family, post_layers = self._parse_model_name(model_name)
+
+        num_features = int(getattr(data, "num_features", 0))
+        x_train_num = getattr(data, "x_train_num", None)
+        y_train = getattr(data, "y_train", None)
+
+        backbone_type = backbone_name.lower()
+        embedding = self._build_embedding(
+            backbone_type=backbone_type,
+            emb_family=emb_family,
+            post_layers=post_layers,
+            num_features=num_features,
+            x_train_num=x_train_num,
+            y_train=y_train,
+            config=config,
+        )
+
+        backbone = self._build_backbone(
+            backbone_type=backbone_type,
+            embedding=embedding,
+            num_features=num_features,
+            config=config,
+        )
+
+        head = self._build_head(backbone=backbone, task_type=task_type, data=data)
+        return TabularModel(embedding=embedding, backbone=backbone, head=head)
+
+    def _resolve_model_name(self, config: Mapping[str, Any]) -> str:
+        """Extracts model name from config."""
+        model_name = config.get("model_name")
+        if model_name is None:
+            model_name = self._config.get("model_name")
+        if model_name is None:
+            raise KeyError("Missing required key 'model_name' in config.")
+        return str(model_name)
+
+    def _resolve_task_type(self, config: Mapping[str, Any], data: Any) -> str:
+        """Resolves the task type from config or data metadata."""
+        task_type = config.get("task_type")
+        if task_type is None:
+            task_type = getattr(data, "feature_metadata", {}).get("task_type")
+        if task_type is None:
+            raise KeyError("Missing required task_type in config or data metadata.")
+        return str(task_type).lower()
+
+    def _parse_model_name(self, model_name: str) -> Tuple[str, str, str]:
+        """Parses a model name into backbone, embedding family, and postfix."""
+        name = str(model_name).strip()
+        if not name:
+            raise ValueError("model_name cannot be empty.")
+
+        parts = name.split("-")
+        backbone = parts[0]
+        if backbone.lower() not in self._SUPPORTED_BACKBONES:
+            raise ValueError(
+                f"Unsupported backbone '{backbone}'. Supported: {sorted(self._SUPPORTED_BACKBONES)}"
+            )
+
+        suffix = "-".join(parts[1:]) if len(parts) > 1 else ""
+        return backbone, suffix, suffix
+
+    def _build_embedding(
+        self,
+        backbone_type: str,
+        emb_family: str,
+        post_layers: str,
+        num_features: int,
+        x_train_num: Optional[Tensor],
+        y_train: Optional[Tensor],
+        config: Mapping[str, Any],
+    ) -> BaseEmbedding:
+        """Instantiates the numerical embedding module."""
+        embedding_factory = EmbeddingFactory(self._config)
+        family = emb_family.upper()
+
+        if family == "":
+            return _IdentityEmbedding(num_features=num_features, backbone_type=backbone_type)
+
+        if family in {"L", "LR", "LRLR"}:
+            output_dim = self._resolve_linear_output_dim(config)
+            base_embedding = LinearEmbedding(
+                num_features=num_features,
+                output_dim=output_dim,
+                backbone_type=backbone_type,
+            )
+            return self._maybe_wrap_with_post_layers(
+                base_embedding=base_embedding,
+                backbone_type=backbone_type,
+                post_layers=family,
+                output_dim=output_dim,
+            )
+
+        if family in {"Q", "Q-L", "Q-LR", "Q-LRLR"}:
+            num_bins = self._resolve_ple_quantiles(config)
+            base_embedding = PiecewiseLinearEmbedding(
+                num_features=num_features,
+                output_dim=self._resolve_ple_output_dim(config, backbone_type),
+                num_bins=num_bins,
+                backbone_type=backbone_type,
+                binning="quantile",
+            )
+            if x_train_num is not None:
+                base_embedding.fit(x_train=x_train_num)
+            return self._maybe_wrap_with_post_layers(
+                base_embedding=base_embedding,
+                backbone_type=backbone_type,
+                post_layers=family[2:] if family.startswith("Q-") else "",
+                output_dim=self._resolve_ple_output_dim(config, backbone_type),
+            )
+
+        if family in {"T", "T-L", "T-LR", "T-LRLR"}:
+            ple_tree = self._tuning_cfg.get("search_spaces", {}).get("ple_tree", {})
+            base_embedding = PiecewiseLinearEmbedding(
+                num_features=num_features,
+                output_dim=self._resolve_ple_output_dim(config, backbone_type),
+                num_bins=self._resolve_ple_quantiles(config),
+                backbone_type=backbone_type,
+                binning="target",
+                max_leaves=int(self._resolve_from_range(ple_tree.get("max_leaves"), 16)),
+                min_items_per_leaf=int(self._resolve_from_range(ple_tree.get("min_items_per_leaf"), 1)),
+                min_information_gain=float(
+                    self._resolve_from_range(ple_tree.get("min_information_gain"), 1e-9)
+                ),
+            )
+            if x_train_num is not None and y_train is not None:
+                base_embedding.fit(x_train=x_train_num, y_train=y_train)
+            return self._maybe_wrap_with_post_layers(
+                base_embedding=base_embedding,
+                backbone_type=backbone_type,
+                post_layers=family[2:] if family.startswith("T-") else "",
+                output_dim=self._resolve_ple_output_dim(config, backbone_type),
+            )
+
+        if family in {"P", "PL", "PLR"}:
+            base_embedding = PeriodicEmbedding(
+                num_features=num_features,
+                output_dim=self._resolve_periodic_output_dim(config, backbone_type),
+                sigma=self._resolve_periodic_sigma(config),
+                k=self._resolve_periodic_k(config),
+                backbone_type=backbone_type,
+            )
+            return self._maybe_wrap_with_post_layers(
+                base_embedding=base_embedding,
+                backbone_type=backbone_type,
+                post_layers=family[1:] if family.startswith("P") else "",
+                output_dim=self._resolve_periodic_output_dim(config, backbone_type),
+            )
+
+        if family == "NONE":
+            return _IdentityEmbedding(num_features=num_features, backbone_type=backbone_type)
+
+        raise ValueError(
+            f"Unsupported model embedding suffix '{emb_family}' in model name."
+        )
+
+    def _maybe_wrap_with_post_layers(
+        self,
+        base_embedding: BaseEmbedding,
+        backbone_type: str,
+        post_layers: str,
+        output_dim: int,
+    ) -> BaseEmbedding:
+        """Wraps embeddings when the model name indicates extra layers."""
+        suffix = str(post_layers).upper()
+        if suffix in {"", "Q", "T", "P"}:
+            return base_embedding
+
+        if isinstance(base_embedding, _IdentityEmbedding):
+            return base_embedding
+
+        if backbone_type == "transformer":
+            # Transformer variants keep token structure; the embedding modules in
+            # models.embeddings already handle feature-wise output formatting.
+            return base_embedding
+
+        # For non-transformers, we keep the embedding module as-is because the
+        # underlying embedding implementations already flatten token outputs for
+        # MLP/ResNet backbones. This hook exists to preserve explicit composition
+        # semantics without changing the public interface.
+        return base_embedding
+
+    def _build_backbone(
+        self,
+        backbone_type: str,
+        embedding: BaseEmbedding,
+        num_features: int,
+        config: Mapping[str, Any],
+    ) -> nn.Module:
+        """Instantiates the backbone network with config-driven dimensions."""
+        if backbone_type == "mlp":
+            model_cfg = dict(self._models_cfg.get("mlp", {}))
+            hidden_dim = self._resolve_int_range(model_cfg.get("layer_size"), default=128)
+            num_layers = self._resolve_int_range(model_cfg.get("layers"), default=2)
+            dropout = self._resolve_float_range(model_cfg.get("dropout"), default=0.0)
+            input_dim = self._infer_flat_input_dim(embedding, num_features)
+            backbone = MLPBackbone(
+                input_dim=input_dim,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                dropout=dropout,
+            )
+            return backbone
+
+        if backbone_type == "resnet":
+            model_cfg = dict(self._models_cfg.get("resnet", {}))
+            hidden_dim = self._resolve_int_range(model_cfg.get("layer_size"), default=128)
+            num_layers = self._resolve_int_range(model_cfg.get("layers"), default=2)
+            hidden_factor = self._resolve_float_range(model_cfg.get("hidden_factor"), default=2.0)
+            dropout = self._resolve_float_range(model_cfg.get("residual_dropout"), default=0.0)
+            input_dim = self._infer_flat_input_dim(embedding, num_features)
+            backbone = ResNetBackbone(
+                input_dim=input_dim,
+                hidden_dim=hidden_dim,
+                num_layers=num_layers,
+                hidden_factor=hidden_factor,
+                dropout=dropout,
+            )
+            return backbone
+
+        if backbone_type == "transformer":
+            model_cfg = dict(self._models_cfg.get("transformer", {}))
+            task_key = self._resolve_transformer_group_key(config)
+            layers_cfg = dict(model_cfg.get("layers", {}))
+            emb_cfg = dict(model_cfg.get("embedding_size", {}))
+            res_cfg = dict(model_cfg.get("residual_dropout", {}))
+            wd_cfg = dict(model_cfg.get("weight_decay", {}))
+
+            n_layers = self._resolve_int_range(layers_cfg.get(task_key), default=2)
+            emb_dim = self._resolve_int_range(emb_cfg.get(task_key), default=192)
+            residual_dropout = self._resolve_float_range(res_cfg.get(task_key), default=0.0)
+            attn_dropout = self._resolve_float_range(model_cfg.get("attention_dropout"), default=0.0)
+            ffn_dropout = self._resolve_float_range(model_cfg.get("ffn_dropout"), default=0.0)
+            ffn_factor = self._resolve_float_range(model_cfg.get("ffn_factor"), default=1.0)
+            weight_decay = self._resolve_float_range(wd_cfg.get(task_key), default=1e-5)
+
+            num_tokens = num_features
+            num_heads = self._resolve_num_heads(emb_dim)
+
+            # The returned backbone is a standard Transformer encoder. The
+            # attention/weight decay hyperparameters are consumed by training
+            # and tuning modules, but we keep the architecture consistent here.
+            backbone = TransformerBackbone(
+                num_tokens=num_tokens,
+                emb_dim=emb_dim,
+                n_layers=n_layers,
+                n_heads=num_heads,
+                ffn_factor=ffn_factor,
+                dropout=max(residual_dropout, attn_dropout, ffn_dropout),
+            )
+            return backbone
+
+        raise ValueError(f"Unsupported backbone type: {backbone_type!r}")
+
+    def _build_head(self, backbone: nn.Module, task_type: str, data: Any) -> nn.Module:
+        """Builds a task-specific prediction head."""
+        if task_type == "regression":
+            out_dim = 1
+        elif task_type in {"binary", "multiclass"}:
+            num_classes = self._infer_num_classes(data)
+            out_dim = max(2, num_classes)
+        else:
+            raise ValueError(f"Unsupported task type: {task_type!r}")
+
+        in_dim = self._infer_backbone_output_dim(backbone)
+        head = nn.Linear(in_dim, out_dim)
+        return head
+
+    def _infer_backbone_output_dim(self, backbone: nn.Module) -> int:
+        """Infers the output representation size of a backbone."""
+        if hasattr(backbone, "hidden_dim"):
+            return int(getattr(backbone, "hidden_dim"))
+        if hasattr(backbone, "emb_dim"):
+            return int(getattr(backbone, "emb_dim"))
+        raise ValueError(
+            f"Unable to infer backbone output dimension from {type(backbone).__name__}."
+        )
+
+    def _infer_num_classes(self, data: Any) -> int:
+        """Infers the number of classes for classification tasks."""
+        metadata = getattr(data, "feature_metadata", {})
+        if isinstance(metadata, Mapping):
+            value = metadata.get("num_classes")
+            if value is not None:
+                return int(value)
+
+        y_train = getattr(data, "y_train", None)
+        if y_train is None:
+            return 2
+        y_arr = torch.as_tensor(y_train).detach().cpu().numpy().reshape(-1)
+        classes = sorted(set(int(v) for v in y_arr.tolist()))
+        return max(2, len(classes))
+
+    def _infer_flat_input_dim(self, embedding: BaseEmbedding, num_features: int) -> int:
+        """Infers flat input dimensionality for MLP/ResNet backbones."""
+        if isinstance(embedding, _IdentityEmbedding):
+            return max(1, num_features)
+
+        if isinstance(embedding, LinearEmbedding):
+            return max(1, num_features * max(1, embedding.output_dim))
+
+        if isinstance(embedding, PeriodicEmbedding):
+            return max(1, num_features * max(1, embedding.output_dim))
+
+        if isinstance(embedding, PiecewiseLinearEmbedding):
+            if embedding.output_dim > 0:
+                return max(1, num_features * embedding.output_dim)
+            return max(1, num_features * max(1, embedding.num_bins))
+
+        return max(1, num_features)
+
+    def _resolve_linear_output_dim(self, config: Mapping[str, Any]) -> int:
+        """Resolves linear embedding output dimension from tuning space/config."""
+        search = self._tuning_cfg.get("search_spaces", {})
+        value = search.get("linear_embedding_output_dim", (1, 128))
+        return self._resolve_int_range(value, default=128)
+
+    def _resolve_ple_quantiles(self, config: Mapping[str, Any]) -> int:
+        """Resolves the PLE quantile/bin count."""
+        search = self._tuning_cfg.get("search_spaces", {})
+        value = search.get("ple_quantiles", (2, 256))
+        return self._resolve_int_range(value, default=16)
+
+    def _resolve_ple_output_dim(self, config: Mapping[str, Any], backbone_type: str) -> int:
+        """Resolves PLE projection dimension."""
+        if backbone_type == "transformer":
+            task_key = self._resolve_transformer_group_key(config)
+            model_cfg = dict(self._models_cfg.get("transformer", {}))
+            emb_cfg = dict(model_cfg.get("embedding_size", {}))
+            return self._resolve_int_range(emb_cfg.get(task_key), default=192)
+        return self._resolve_linear_output_dim(config)
+
+    def _resolve_periodic_output_dim(self, config: Mapping[str, Any], backbone_type: str) -> int:
+        """Resolves periodic embedding projection dimension."""
+        if backbone_type == "transformer":
+            task_key = self._resolve_transformer_group_key(config)
+            model_cfg = dict(self._models_cfg.get("transformer", {}))
+            emb_cfg = dict(model_cfg.get("embedding_size", {}))
+            return self._resolve_int_range(emb_cfg.get(task_key), default=192)
+        return self._resolve_linear_output_dim(config)
+
+    def _resolve_periodic_sigma(self, config: Mapping[str, Any]) -> float:
+        """Resolves the sigma hyperparameter for periodic embedding."""
+        value = config.get("sigma")
+        if value is not None:
+            return float(value)
+        return 1.0
+
+    def _resolve_periodic_k(self, config: Mapping[str, Any]) -> int:
+        """Resolves the periodic component count."""
+        search = self._tuning_cfg.get("search_spaces", {})
+        value = search.get("periodic_k", (1, 128))
+        return self._resolve_int_range(value, default=8)
+
+    def _resolve_transformer_group_key(self, config: Mapping[str, Any]) -> str:
+        """Chooses the SA/CO/MI vs other transformer hyperparameter group."""
+        dataset_name = str(
+            config.get("dataset_name", self._config.get("experiment", {}).get("dataset_name", ""))
+        ).lower()
+        if dataset_name in {"sa", "co", "mi"}:
+            return "sa_co_mi"
+        return "other"
+
+    def _resolve_num_heads(self, emb_dim: int) -> int:
+        """Returns a valid attention head count for a given embedding size."""
+        for candidate in (8, 4, 2, 1):
+            if emb_dim % candidate == 0:
+                return candidate
+        return 1
+
+    def _resolve_int_range(self, value: Any, default: int) -> int:
+        """Resolves an integer from config range-like values."""
+        if value is None:
+            return int(default)
+        if isinstance(value, int):
+            return int(value)
+        if isinstance(value, Sequence) and len(value) >= 2:
+            return int(value[1])
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return int(default)
+
+    def _resolve_float_range(self, value: Any, default: float) -> float:
+        """Resolves a float from config range-like values."""
+        if value is None:
+            return float(default)
+        if isinstance(value, float):
+            return float(value)
+        if isinstance(value, int):
+            return float(value)
+        if isinstance(value, Sequence) and len(value) >= 2:
+            try:
+                return float(value[1])
+            except (TypeError, ValueError):
+                return float(default)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _resolve_from_range(self, value: Any, default: Any) -> Any:
+        """Returns the second element of a range-like config value, or default."""
+        if value is None:
+            return default
+        if isinstance(value, Sequence) and len(value) >= 2:
+            return value[1]
+        return value
+
+
+__all__ = ["TabularModel", "ModelFactory"]

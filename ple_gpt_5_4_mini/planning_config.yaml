@@ -1,0 +1,130 @@
+## config.yaml
+experiment:
+  seed: 42
+  num_seeds: 15
+  num_ensembles: 3
+  ensemble_group_size: 5
+
+data:
+  preprocessing:
+    numerical:
+      default: quantile_transform
+      otto_group_product_classification: none
+    categorical:
+      default: one_hot
+  target:
+    regression_standardization: true
+
+training:
+  optimizer: adamw
+  loss:
+    classification: cross_entropy
+    regression: mse
+  learning_rate:
+    mlp: [5.0e-05, 0.005]
+    resnet: [5.0e-05, 0.005]
+    transformer:
+      sa_co_mi: [1.0e-05, 3.0e-04]
+      other: [1.0e-05, 0.001]
+  batch_size:
+    ge: 128
+    ch: 128
+    ca: 256
+    ho: 256
+    ad: 256
+    ot: 512
+    hi: 512
+    fb: 512
+    sa: 1024
+    co: 1024
+    mi: 1024
+  early_stopping:
+    patience: 16
+    min_delta: 0.0
+  lr_schedule: none
+  max_epochs: 100
+
+hyperparameter_tuning:
+  method: optuna_tpe
+  trials: 100
+  search_spaces:
+    linear_embedding_output_dim: [1, 128]
+    ple_quantiles: [2, 256]
+    ple_tree:
+      max_leaves: [2, 256]
+      min_items_per_leaf: [1, 128]
+      min_information_gain: [1.0e-09, 0.01]
+    periodic_k: [1, 128]
+
+models:
+  mlp:
+    layers: [1, 16]
+    layer_size: [1, 1024]
+    dropout: [0.0, 0.5]
+    weight_decay: [0.0, 1.0e-03]
+  resnet:
+    layers: [1, 8]
+    layer_size: [32, 512]
+    hidden_factor: [1.0, 4.0]
+    hidden_dropout: [0.0, 0.5]
+    residual_dropout: [0.0, 0.5]
+    weight_decay: [0.0, 1.0e-03]
+  transformer:
+    layers:
+      sa_co_mi: [2, 4]
+      other: [1, 4]
+    embedding_size:
+      sa_co_mi: [192, 512]
+      other: [96, 512]
+    residual_dropout:
+      sa_co_mi: 0.0
+      other: [0.0, 0.2]
+    attention_dropout: [0.0, 0.5]
+    ffn_dropout: [0.0, 0.5]
+    ffn_factor: [0.6666667, 2.6666667]
+    weight_decay:
+      sa_co_mi: 1.0e-05
+      other: [1.0e-06, 1.0e-04]
+
+evaluation:
+  metrics:
+    classification: accuracy
+    regression: rmse
+  validation_selection: best_validation_score
+  test_runs_per_tuned_config: 15
+
+baselines:
+  catboost:
+    fixed:
+      early_stopping_rounds: 50
+      od_pval: 0.001
+      iterations: 2000
+    tuning:
+      max_depth: [1, 10]
+      learning_rate: [0.001, 1.0]
+      bagging_temperature: [0.0, 1.0]
+      l2_leaf_reg: [1.0, 10.0]
+      leaf_estimation_iterations: [1, 10]
+  xgboost:
+    fixed:
+      booster: gbtree
+      early_stopping_rounds: 50
+      n_estimators: 2000
+    tuning:
+      max_depth: [3, 10]
+      min_child_weight: [1.0e-04, 100.0]
+      subsample: [0.5, 1.0]
+      learning_rate: [0.001, 1.0]
+      colsample_bytree: [0.5, 1.0]
+      gamma: [0.0, 100.0]
+      lambda: [0.0, 10.0]
+
+notes:
+  source: "On Embeddings for Numerical Features in Tabular Deep Learning"
+  implementation_constraints:
+    - "Use the same preprocessing for all deep models within a dataset."
+    - "Do not apply feature preprocessing for Otto Group Product Classification."
+    - "Standardize regression targets for all algorithms."
+    - "Run 15 random seeds for each tuned configuration."
+    - "Use no learning rate schedule."
+    - "Use patience = 16 for early stopping."

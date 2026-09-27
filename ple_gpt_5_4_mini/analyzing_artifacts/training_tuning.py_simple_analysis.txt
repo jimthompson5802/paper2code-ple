@@ -1,0 +1,480 @@
+# Logic Analysis: `training/tuning.py`
+
+This module is responsible for reproducing the paper’s **hyperparameter tuning protocol** using **Optuna TPE** and the paper’s dataset/model-specific search spaces. It must produce a best configuration per dataset/model variant by optimizing **validation performance only**, then pass that best configuration to final training and the repeated-seed evaluation pipeline.
+
+---
+
+## 1) Role of this module in the reproduction pipeline
+
+`training/tuning.py` sits between:
+
+1. **Data preprocessing** (`data/preprocessing.py`)
+2. **Model construction** (`models/tabular_model.py`)
+3. **Training/evaluation** (`training/trainer.py`, `evaluation/metrics.py`)
+
+Its responsibilities are:
+
+- define the Optuna objective
+- sample hyperparameters according to the paper/config
+- train one candidate model per trial
+- evaluate on validation set only
+- return the best hyperparameters/configuration
+- preserve exact dataset-dependent search spaces and model-family-specific choices
+
+This module must not:
+- use test data for tuning
+- modify the paper’s training protocol
+- invent any additional search dimensions beyond those in `config.yaml` and the paper text
+
+---
+
+## 2) Required inputs and outputs
+
+### Inputs
+The tuner should operate using:
+
+- the shared experiment config schema
+- dataset identity (`dataset_name`)
+- task type (`classification`, `regression`)
+- model name (`model_name`)
+- preprocessed train/validation data
+- model family information:
+  - `mlp`
+  - `resnet`
+  - `transformer`
+- embedding type / model variant naming:
+  - e.g. `MLP-LR`, `MLP-Q-LR`, `Transformer-T-LR`, etc.
+
+### Outputs
+For each tuned experiment, the tuner should return:
+
+- best hyperparameter configuration
+- best validation score
+- optionally best trial metadata for logging/saving
+
+The returned config must be compatible with `ModelFactory` and `Trainer`.
+
+---
+
+## 3) Strict configuration sources to use
+
+This module must reference values only from `config.yaml`:
+
+### Experiment control
+- `experiment.seed = 42`
+- `experiment.num_seeds = 15`
+- `experiment.num_ensembles = 3`
+- `experiment.ensemble_group_size = 5`
+
+### Tuning control
+- `hyperparameter_tuning.method = optuna_tpe`
+- `hyperparameter_tuning.trials = 100`
+
+### Search spaces
+- `hyperparameter_tuning.search_spaces.linear_embedding_output_dim = [1, 128]`
+- `hyperparameter_tuning.search_spaces.ple_quantiles = [2, 256]`
+- `hyperparameter_tuning.search_spaces.ple_tree.max_leaves = [2, 256]`
+- `hyperparameter_tuning.search_spaces.ple_tree.min_items_per_leaf = [1, 128]`
+- `hyperparameter_tuning.search_spaces.ple_tree.min_information_gain = [1.0e-09, 0.01]`
+- `hyperparameter_tuning.search_spaces.periodic_k = [1, 128]`
+
+### Model-specific ranges
+- `models.mlp.layers = [1, 16]`
+- `models.mlp.layer_size = [1, 1024]`
+- `models.mlp.dropout = [0.0, 0.5]`
+- `models.mlp.weight_decay = [0.0, 1.0e-03]`
+
+- `models.resnet.layers = [1, 8]`
+- `models.resnet.layer_size = [32, 512]`
+- `models.resnet.hidden_factor = [1.0, 4.0]`
+- `models.resnet.hidden_dropout = [0.0, 0.5]`
+- `models.resnet.residual_dropout = [0.0, 0.5]`
+- `models.resnet.weight_decay = [0.0, 1.0e-03]`
+
+- `models.transformer.layers.sa_co_mi = [2, 4]`
+- `models.transformer.layers.other = [1, 4]`
+- `models.transformer.embedding_size.sa_co_mi = [192, 512]`
+- `models.transformer.embedding_size.other = [96, 512]`
+- `models.transformer.residual_dropout.sa_co_mi = 0.0`
+- `models.transformer.residual_dropout.other = [0.0, 0.2]`
+- `models.transformer.attention_dropout = [0.0, 0.5]`
+- `models.transformer.ffn_dropout = [0.0, 0.5]`
+- `models.transformer.ffn_factor = [0.6666667, 2.6666667]`
+- `models.transformer.weight_decay.sa_co_mi = 1.0e-05`
+- `models.transformer.weight_decay.other = [1.0e-06, 1.0e-04]`
+
+### Optimization / early stopping
+- optimizer: `adamw`
+- no LR schedule
+- `training.early_stopping.patience = 16`
+- `training.early_stopping.min_delta = 0.0`
+- `training.max_epochs = 100`
+
+### Validation selection
+- `evaluation.validation_selection = best_validation_score`
+
+---
+
+## 4) Core tuning logic
+
+The paper uses **Optuna TPE** and selects hyperparameters by validation score. Therefore the tuner should:
+
+1. create an Optuna study
+2. define an objective function
+3. sample a trial configuration
+4. build the corresponding model
+5. train with early stopping
+6. evaluate validation metric
+7. return a scalar objective value consistent with the metric direction
+
+### Direction of optimization
+The module must optimize according to the metric:
+
+- **classification**: maximize accuracy
+- **regression**: minimize RMSE
+
+This implies the objective must map scores correctly:
+- for accuracy, higher is better
+- for RMSE, lower is better
+
+The tuner should align with `MetricsEvaluator` for score computation.
+
+---
+
+## 5) Dataset-specific search space branching
+
+The paper and config specify different tuning ranges for some datasets, especially Transformer.
+
+### Datasets in the special Transformer group
+The config uses the special group:
+- `sa`
+- `co`
+- `mi`
+
+For these datasets:
+- smaller LR range
+- larger embedding size range
+- fixed residual dropout = 0.0
+- fixed weight decay = 1e-5
+
+For all other datasets:
+- wider LR range
+- different embedding size range
+- residual dropout sampled from `[0.0, 0.2]`
+- weight decay sampled from `[1e-6, 1e-4]`
+
+The tuner must branch on `dataset_name` exactly using these rules.
+
+---
+
+## 6) Hyperparameters to sample by model family
+
+This module must handle tuning depending on both:
+
+- the **backbone**
+- the **embedding module**
+- the **dataset group**
+
+### 6.1 MLP family
+For MLP-based models, tune from config:
+
+- number of layers
+- layer size
+- dropout
+- weight decay
+- learning rate
+
+If the variant includes linear embedding or linear layers on top of embeddings, also tune:
+- `linear_embedding_output_dim`
+
+For the embedding-specific variants:
+- **PLE-q**: tune `ple_quantiles`
+- **PLE-t**: tune `ple_tree.max_leaves`, `ple_tree.min_items_per_leaf`, `ple_tree.min_information_gain`
+- **Periodic**: tune `periodic_k`
+- also the periodic module needs its paper-specific sigma parameter if it exists in the implementation; however, since `config.yaml` does not provide a search space for sigma, this module must either:
+  - use a fixed implementation default, or
+  - defer to a model-level default already encoded elsewhere
+  but it must not invent a sigma range in this file
+
+The paper says periodic has `sigma` and `k`, but only `k` is explicitly present in the config, so this is a constraint to respect.
+
+### 6.2 ResNet family
+Tune:
+
+- number of layers
+- layer size
+- hidden factor
+- hidden dropout
+- residual dropout
+- weight decay
+- learning rate
+
+And the same embedding-specific hyperparameters as above when applicable:
+- linear embedding output dim
+- PLE quantiles / tree bins
+- periodic k
+
+### 6.3 Transformer family
+Tune:
+
+- number of layers
+- embedding size
+- residual dropout
+- attention dropout
+- FFN dropout
+- FFN factor
+- weight decay
+- learning rate
+
+And embedding-specific hyperparameters when applicable:
+- linear embedding output dim
+- PLE quantiles / tree bins
+- periodic k
+
+---
+
+## 7) Model-name parsing responsibility
+
+The tuner needs a deterministic way to interpret the model name.
+
+Examples from the paper:
+- `MLP`
+- `MLP-LR`
+- `MLP-Q-LR`
+- `MLP-T-LR`
+- `MLP-P`
+- `MLP-PLR`
+- `ResNet-PLR`
+- `Transformer-T-LR`
+
+The tuner must not implement model logic directly. Instead, it should:
+
+1. read the `model_name`
+2. determine backbone family
+3. determine embedding family
+4. sample hyperparameters relevant to that family only
+
+This should be consistent with `ModelFactory`, but the tuner needs enough awareness to know what to sample.
+
+---
+
+## 8) Objective function structure
+
+The objective function should follow this flow:
+
+1. receive an Optuna trial
+2. sample all relevant hyperparameters
+3. merge sampled values into a deep copy of the base config
+4. build the model with `ModelFactory`
+5. instantiate `Trainer`
+6. train until early stopping or max epochs
+7. compute validation score using `MetricsEvaluator`
+8. return the score in the correct optimization direction
+
+### Important
+The objective must use:
+- training split for fitting
+- validation split for scoring
+- no test access
+
+### Returned scalar
+The objective should be a single scalar:
+- accuracy directly for classification
+- RMSE directly for regression if minimizing
+  - if Optuna study is configured as `minimize`, return RMSE
+  - if configured as `maximize`, return negative RMSE
+The design should choose one consistent convention. The safest is:
+- use Optuna study direction matching the metric:
+  - `maximize` for accuracy
+  - `minimize` for RMSE
+
+This avoids negation mistakes.
+
+---
+
+## 9) Handling repeated runs and final evaluation
+
+This tuner is only for selecting hyperparameters. After tuning:
+
+- the best config is reused for **15 seeds**
+- final test results are computed elsewhere
+- ensemble logic is handled elsewhere
+
+Therefore `training/tuning.py` should expose results sufficient for downstream execution:
+- best_params
+- best_trial
+- best_validation_score
+
+It should not aggregate over 15 seeds itself.
+
+---
+
+## 10) Required interactions with other modules
+
+### With `Trainer`
+The tuner depends on trainer to:
+- run a full candidate training
+- stop early based on validation
+
+The trainer must already support:
+- train
+- validate
+- checkpointing best validation weights
+
+The tuner should treat `Trainer` as the execution engine and not duplicate its logic.
+
+### With `ModelFactory`
+The tuner should not manually instantiate embeddings/backbones. It should:
+- pass a config containing sampled hyperparameters
+- let `ModelFactory` construct the correct composed model
+
+### With `MetricsEvaluator`
+The tuner should rely on a single metric computation pathway so that:
+- tuning validation score
+- final test score
+- ensemble score
+all use consistent definitions.
+
+---
+
+## 11) Copying and mutation rules
+
+Because each trial modifies configuration values, the tuner must:
+
+- deep copy the base configuration for every trial
+- never mutate the global config in-place
+- isolate trial-specific values from other trials
+
+This is important because:
+- multiple trials run sequentially in one study
+- Optuna objective state must remain independent
+
+---
+
+## 12) Suggested internal data flow
+
+For each objective call:
+
+1. `trial -> sampled hyperparameters`
+2. `base_config deep copied`
+3. `trial params inserted into model/training config`
+4. `ModelFactory.create(config, data)` returns model
+5. `Trainer.train(data)` returns validation history / best checkpoint
+6. `MetricsEvaluator` computes final validation score
+7. objective returns score
+
+The tuner should also persist the trial summary if logging is enabled through the broader pipeline.
+
+---
+
+## 13) Search-space implementation details
+
+### Integer parameters
+Use Optuna integer suggestions for:
+- layers
+- layer size
+- periodic_k
+- PLE quantiles
+- PLE tree leaves
+- PLE tree min items per leaf
+- PLE tree min info gain?  
+  This one is continuous, so use a float suggestion on a log scale if implementing via Optuna.
+
+### Float parameters
+Use Optuna float suggestions for:
+- dropout
+- hidden_factor
+- residual_dropout
+- attention_dropout
+- ffn_dropout
+- ffn_factor
+- weight decay
+- learning rate
+- min information gain
+
+### Conditional parameters
+Some parameters are conditional on model family or dataset group:
+
+- Transformer layers and embedding size vary by dataset group
+- Transformer residual dropout and weight decay vary by dataset group
+- embedding-specific search dimensions only apply when the model includes those embeddings
+
+---
+
+## 14) Paper fidelity constraints
+
+The tuner must reflect the paper’s tuning protocol:
+
+- TPE sampler
+- 100 trials
+- validation-based selection
+- no test leakage
+- model-specific search spaces
+- dataset-specific transformer search space
+- 15-seed final evaluation after tuning
+- early stopping patience = 16
+- max epochs = 100
+- no LR schedule
+
+These are not optional.
+
+---
+
+## 15) Edge cases to handle
+
+### Regression vs classification
+The tuner must be able to switch objective direction based on task type.
+
+### Otto preprocessing exception
+Since Otto has no feature preprocessing, tuning must still proceed with the corresponding preprocessed data object.
+
+### Microsoft dataset
+Treat as regression per the paper; tuning should use RMSE.
+
+### Datasets with categorical features
+Tuning should not change preprocessing behavior; it only tunes model parameters.
+
+### Variant names without extra embedding parameters
+For plain backbones like `MLP`, `ResNet`, `Transformer-L`, the tuner should avoid injecting unnecessary embedding-search params.
+
+---
+
+## 16) Output artifacts recommended
+
+Although not required in the interface, the tuner should be designed to produce:
+
+- best hyperparameters dict
+- best validation score
+- Optuna study object or summary
+- optionally per-trial logs
+
+These are useful for:
+- reproducibility
+- later table generation
+- rerunning final evaluations with the selected config
+
+---
+
+## 17) Non-goals for this file
+
+This file should not:
+- implement dataset downloading
+- implement preprocessing transformations
+- implement embedding math
+- implement the full training loop
+- implement ensemble evaluation
+- implement GBDT baselines
+
+Those belong in their designated modules.
+
+---
+
+## 18) Final implementation takeaway
+
+`training/tuning.py` should be a **thin orchestration layer** over Optuna, `ModelFactory`, and `Trainer`, with careful conditional sampling based on:
+
+- dataset group
+- backbone family
+- embedding variant
+
+Its central requirement is to reproduce the paper’s hyperparameter tuning faithfully, using only the values explicitly given in `config.yaml`, and to ensure that the final chosen configuration is valid for downstream repeated-seed evaluation.

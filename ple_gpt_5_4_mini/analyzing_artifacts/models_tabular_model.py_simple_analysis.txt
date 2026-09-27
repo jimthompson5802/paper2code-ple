@@ -1,0 +1,528 @@
+## Logic Analysis: `models/tabular_model.py`
+
+This module is the composition layer that turns the paper’s abstract “Backbone-Embedding” naming convention into concrete PyTorch models. It must remain faithful to the paper’s feature-wise embedding framework and the configuration constraints from `config.yaml`.
+
+---
+
+### 1) Purpose of this module
+
+`models/tabular_model.py` must:
+
+1. **Compose**:
+   - a numerical embedding module,
+   - a backbone network,
+   - a task-specific prediction head.
+
+2. **Map model names deterministically** to the right architecture, e.g.:
+   - `MLP`
+   - `MLP-L`
+   - `MLP-Q`
+   - `MLP-Q-LR`
+   - `MLP-PLR`
+   - `ResNet-T-LR`
+   - `Transformer-PLR`
+   - etc.
+
+3. **Handle task output correctly**:
+   - classification: logits for classes
+   - regression: single continuous output
+
+4. **Route inputs consistently**:
+   - `forward(x_num, x_cat=None)` should accept numerical tensors and optional categorical tensors.
+   - Categorical handling should be compatible with the shared preprocessing strategy, but this module should not implement preprocessing itself.
+
+---
+
+### 2) Constraints from the paper that must be preserved
+
+#### 2.1 Feature-wise independent numerical embeddings
+The paper explicitly states that each numerical feature must be embedded independently and no parameters are shared across features. Therefore:
+
+- The model factory must instantiate embedding modules that respect **per-feature separation**.
+- The tabular model must not concatenate or mix raw scalar features before embedding, except where the embedding design explicitly requires a backbone-level mix afterward.
+
+#### 2.2 Backbone-specific use of embeddings
+From the paper:
+
+- **MLP-like backbones**: embeddings are concatenated into a flat vector.
+- **Transformer-like backbones**: embeddings are passed as token-like feature embeddings.
+
+This means `TabularModel.forward()` must not assume one fixed embedding output format. It must trust the embedding module / backbone interface.
+
+#### 2.3 PLE + Transformer requires a linear projection
+The paper notes that PLE alone is not enough for Transformer-like models because the Transformer is permutation-invariant over token order. For Transformer variants with PLE, a linear layer after PLE is required.
+
+So model construction must ensure:
+- `Transformer-Q-L`, `Transformer-T-L`, and related variants include the correct post-PLE projection behavior as defined by the embedding module design.
+
+#### 2.4 No invented hyperparameters
+All architectural choices must come from `config.yaml` or the paper. In this file, the module should only interpret the model name and connect to the embedding/backbone constructors. It should not invent extra model-level options.
+
+---
+
+### 3) Inputs this module must expect
+
+The class interfaces should align with the rest of the system:
+
+- `x_num`: tensor of numerical features
+- `x_cat`: optional tensor of categorical features
+
+Given the shared design, this module should assume:
+- numerical features are already preprocessed
+- categorical features are already encoded for non-CatBoost models
+- this module is not responsible for missing-value imputation or transformations
+
+---
+
+### 4) Core classes and responsibilities
+
+---
+
+## 4.1 `TabularModel`
+
+This is the end-to-end model wrapper.
+
+### Responsibilities
+- Hold the embedding module
+- Hold the backbone
+- Hold the prediction head
+- Implement `forward()`
+- Provide a unified interface for training, validation, and inference
+
+### Expected internal structure
+Conceptually:
+
+1. `embedding(x_num, x_cat)` or numerical-only embedding pipeline
+2. backbone processing
+3. prediction head
+
+The exact behavior depends on the backbone type.
+
+---
+
+### 4.2 `ModelFactory`
+
+This is the architecture resolver.
+
+### Responsibilities
+- Interpret `config.model_name`
+- Instantiate the correct embedding module
+- Instantiate the correct backbone
+- Determine prediction head shape from `task_type`
+- Return a `TabularModel`
+
+The factory is where the model naming convention is mapped to actual components.
+
+---
+
+### 5) Model name parsing logic
+
+The model names follow the paper’s `Backbone-Embedding` pattern.
+
+Examples:
+- `MLP`
+- `MLP-L`
+- `MLP-LR`
+- `MLP-Q`
+- `MLP-Q-LR`
+- `MLP-T-LR`
+- `ResNet-PLR`
+- `Transformer-PLR`
+
+The module must interpret these names by splitting them into:
+- backbone prefix
+- embedding suffix / composition suffix
+
+### Backbone identifiers
+The factory should recognize:
+- `MLP`
+- `ResNet`
+- `Transformer`
+
+The paper’s `Transformer-L` corresponds to FT-Transformer-style backbone.
+
+### Embedding identifiers
+The suffixes represent embedding families and optional extra differentiable layers:
+
+- `L` = linear embedding
+- `LR` = linear + ReLU
+- `LRLR` = linear + ReLU + linear + ReLU
+- `Q` = quantile PLE
+- `T` = target-aware PLE
+- `P` = periodic
+- `PL` = periodic + linear
+- `PLR` = periodic + linear + ReLU
+- `Q-L`, `Q-LR`, `Q-LRLR`, etc.
+- `T-L`, `T-LR`, `T-LRLR`, etc.
+
+Important: the module should not hard-code an unrestricted parser that accepts arbitrary unknown forms. It should support the model names used in the paper and config-driven experiments.
+
+---
+
+### 6) Recommended composition rules
+
+This module should enforce the paper’s composition semantics.
+
+---
+
+## 6.1 Baseline model without embedding enhancement
+Examples:
+- `MLP`
+- `ResNet`
+- `Transformer-L`
+
+These should use the standard numerical feature handling from the chosen embedding/backbone implementation. In the context of this reproduction, if the embedding module still exists, it should be the simplest baseline embedding consistent with the backbone implementation.
+
+---
+
+## 6.2 Linear embedding family
+Examples:
+- `MLP-L`
+- `MLP-LR`
+- `MLP-LRLR`
+- `ResNet-L`
+- `ResNet-LR`
+- `Transformer-LR`
+
+These use the **LinearEmbedding** module as the base numerical embedding.
+
+The extra suffix after the base embedding determines whether additional differentiable layers are stacked on top:
+- `L` → plain linear embedding
+- `LR` → linear embedding + ReLU
+- `LRLR` → linear embedding + ReLU + linear + ReLU
+
+The factory should construct these as embedding stacks, not as backbone modifications.
+
+---
+
+## 6.3 PLE family
+Examples:
+- `MLP-Q`
+- `MLP-Q-LR`
+- `MLP-Q-LRLR`
+- `MLP-T`
+- `MLP-T-LR`
+- `MLP-T-LRLR`
+
+The embedding base is `PiecewiseLinearEmbedding`.
+
+The PLE variant requires one of two binning modes:
+- quantile-based
+- target-aware
+
+The model name selects which one to use:
+- `Q` → quantile bins
+- `T` → target-aware bins
+
+Then optional differentiable layers can be stacked after PLE, matching the paper’s naming.
+
+For Transformer-like models, the factory must ensure the PLE output is compatible with token embeddings, which according to the paper means a projection layer after PLE.
+
+---
+
+## 6.4 Periodic family
+Examples:
+- `MLP-P`
+- `MLP-PL`
+- `MLP-PLR`
+- `ResNet-P`
+- `ResNet-PLR`
+- `Transformer-PLR`
+
+The base embedding is `PeriodicEmbedding`.
+
+Then optional layers may be stacked:
+- `P` → periodic only
+- `PL` → periodic + linear
+- `PLR` → periodic + linear + ReLU
+
+The paper says `PL` can be viewed as a redundant linear layer that can be fused with the first backbone layer after training. Even so, the model should represent it explicitly in the architecture.
+
+---
+
+### 7) How the module should treat categorical features
+
+The paper’s protocol says:
+
+- CatBoost uses native categorical handling.
+- All other algorithms use one-hot encoding.
+
+For this module:
+- It should accept `x_cat` in the `forward` signature because the shared design requires it.
+- But the actual model may not need categorical input if preprocessing already one-hot encodes and concatenates features upstream.
+- Therefore, the implementation should be consistent with the rest of the system and not assume categorical tensors are always used.
+
+Practical consequence:
+- `TabularModel.forward()` should be able to ignore `x_cat` if the preprocessor already merged everything into `x_num`-like tensors.
+- If categorical tensors are present, the model should only process them if the broader design routes them into a compatible pathway. Since the provided design emphasizes numerical embeddings, the safest contract is to keep categorical handling minimal and external.
+
+---
+
+### 8) Backbone-specific routing logic
+
+The factory must ensure the embedding output shape matches the backbone expectation.
+
+---
+
+## 8.1 MLP backbone
+Expected behavior:
+- embeddings for all numerical features are concatenated into one flat vector
+- optional categorical features, if already encoded, should be concatenated upstream
+- backbone consumes a 2D tensor `[batch, features]`
+
+So for MLP:
+- embedding module should yield flat concatenated representation
+- backbone input dimension must match the resulting embedding dimension
+- head is attached after backbone output
+
+---
+
+## 8.2 ResNet backbone
+Expected behavior:
+- same input shape convention as MLP
+- typically consumes a flat vector, though internal residual blocks may transform it
+
+So for ResNet:
+- `TabularModel` should treat the embedding output the same as for MLP
+- backbone will handle residual feature mixing internally
+
+---
+
+## 8.3 Transformer backbone
+Expected behavior:
+- consumes token sequence of feature embeddings
+- embeddings should retain token structure `[batch, num_tokens, emb_dim]` or the equivalent representation used by the backbone implementation
+
+For Transformer:
+- the embedding module must produce per-feature token embeddings rather than a flattened vector
+- for PLE-based variants, the paper requires a linear projection after PLE
+- model factory must ensure the token dimension is the backbone’s embedding size from config-driven tuning
+
+This is the main place where the model name must be interpreted carefully.
+
+---
+
+### 9) Output head logic
+
+The model head must be task-aware.
+
+---
+
+## 9.1 Classification head
+For classification tasks:
+- output dimension = number of classes
+- output should be raw logits
+- loss is cross-entropy, handled by trainer
+
+The module should not apply softmax in the model output because training uses cross-entropy directly.
+
+---
+
+## 9.2 Regression head
+For regression tasks:
+- output dimension = 1
+- output should be a single scalar per sample
+- no activation at the final layer
+
+The evaluator and trainer will handle inverse target standardization if needed.
+
+---
+
+### 10) Forward-pass contract
+
+`TabularModel.forward(x_num, x_cat=None)` should:
+
+1. Send inputs through embedding module
+2. Send embedded representation into backbone
+3. Send backbone output into head
+4. Return predictions
+
+### Important constraints
+- Do not mix training logic into `forward`
+- Do not compute losses inside `forward`
+- Do not apply output activations that would interfere with trainer-selected losses
+
+---
+
+### 11) Factory construction rules
+
+The `ModelFactory` should derive the architecture as follows:
+
+#### Step 1: Identify backbone
+Parse the model name prefix:
+- `MLP`
+- `ResNet`
+- `Transformer`
+
+#### Step 2: Identify embedding family
+Parse the suffix:
+- none / baseline
+- `L`, `LR`, `LRLR`
+- `Q`, `Q-L`, `Q-LR`, `Q-LRLR`
+- `T`, `T-L`, `T-LR`, `T-LRLR`
+- `P`, `PL`, `PLR`
+
+#### Step 3: Instantiate the correct embedding module
+Based on:
+- embedding family
+- dataset-specific or tuning-time embedding parameters
+- PLE bin construction mode
+- periodic hyperparameters from config
+
+#### Step 4: Instantiate the backbone
+Based on:
+- backbone type
+- hyperparameters sampled/tuned in `training/tuning.py`
+- dataset-specific config settings such as transformer layer/embedding-size ranges
+
+#### Step 5: Determine head output size
+Based on:
+- `task_type` from config / dataset metadata
+
+#### Step 6: Return `TabularModel`
+The resulting model must be ready for trainer consumption.
+
+---
+
+### 12) Validation of model names
+
+The module should fail early and clearly on unsupported names.
+
+Recommended behavior:
+- If the model name cannot be parsed, raise a descriptive error.
+- If a suffix combination is invalid for the chosen backbone, raise a descriptive error.
+- If required hyperparameters are missing from config, raise a descriptive error.
+
+This is important because the experiment matrix is large and silent fallback would break reproducibility.
+
+---
+
+### 13) Interface expectations with other modules
+
+This module must align with:
+
+#### `models/embeddings.py`
+Expected to provide:
+- `BaseEmbedding`
+- `LinearEmbedding`
+- `PiecewiseLinearEmbedding`
+- `PeriodicEmbedding`
+
+The tabular model should not depend on implementation internals beyond their public constructors and forward methods.
+
+#### `models/backbones.py`
+Expected to provide:
+- `MLPBackbone`
+- `ResNetBackbone`
+- `TransformerBackbone`
+
+The backbone must accept the embedding output shape produced by the chosen embedding module.
+
+#### `training/trainer.py`
+The trainer expects the model to:
+- be a standard `torch.nn.Module`
+- accept `(x_num, x_cat=None)`
+- return raw predictions suitable for the configured loss
+
+---
+
+### 14) Configuration-driven behavior from `config.yaml`
+
+The following config sections are relevant to this module:
+
+#### `models.mlp`
+- `layers`
+- `layer_size`
+- `dropout`
+- `weight_decay`
+
+#### `models.resnet`
+- `layers`
+- `layer_size`
+- `hidden_factor`
+- `hidden_dropout`
+- `residual_dropout`
+- `weight_decay`
+
+#### `models.transformer`
+- `layers.sa_co_mi`
+- `layers.other`
+- `embedding_size.sa_co_mi`
+- `embedding_size.other`
+- `residual_dropout.sa_co_mi`
+- `residual_dropout.other`
+- `attention_dropout`
+- `ffn_dropout`
+- `ffn_factor`
+- `weight_decay.sa_co_mi`
+- `weight_decay.other`
+
+#### `hyperparameter_tuning.search_spaces`
+- `linear_embedding_output_dim`
+- `ple_quantiles`
+- `ple_tree.max_leaves`
+- `ple_tree.min_items_per_leaf`
+- `ple_tree.min_information_gain`
+- `periodic_k`
+
+This module should not tune these values itself, but it must accept them when passed from `ModelFactory`.
+
+---
+
+### 15) Practical implementation implications
+
+Even though this is just the logic analysis, a few implementation-level facts matter:
+
+1. **Keep `TabularModel` thin**
+   - It should be a composition wrapper, not a second trainer or preprocessing layer.
+
+2. **Keep `ModelFactory` deterministic**
+   - Same config + same model name must always build the same component stack.
+
+3. **Treat output head separately**
+   - This avoids mixing representation learning with task-specific prediction logic.
+
+4. **Do not assume every model uses the same embedding dimensionality**
+   - Linear, PLE, and periodic modules may each produce different output shapes.
+
+5. **Transformer variants need careful shape handling**
+   - The embedding output should remain tokenized rather than flattened.
+
+---
+
+### 16) Recommended internal control flow
+
+A correct call flow inside this module should look like:
+
+1. `ModelFactory.create(config, data_metadata)`
+2. Parse `config.model_name`
+3. Select backbone class
+4. Select embedding class
+5. Instantiate embedding with dataset-aware and tuning-aware parameters
+6. Instantiate backbone with config-driven dimensions
+7. Instantiate prediction head based on task
+8. Return `TabularModel(embedding, backbone, head)`
+
+Then at runtime:
+
+1. `Trainer` calls `model(x_num, x_cat)`
+2. `TabularModel.forward()` calls embedding
+3. Backbone processes embeddings
+4. Head generates logits or regression outputs
+5. Trainer computes loss
+
+---
+
+### 17) Summary of the key fidelity requirements
+
+This file must preserve the following paper-specific behaviors:
+
+- feature-wise independent numerical embeddings
+- correct mapping from model names to architecture stacks
+- PLE quantile vs target-aware distinction
+- periodic embedding support with tunable parameters
+- backbone-specific embedding output handling
+- classification/regression output head correctness
+- no leakage of preprocessing or training logic into the model wrapper
+
+If you want, I can next turn this into a **concrete class-by-class implementation blueprint** for `TabularModel` and `ModelFactory`, still without writing code.

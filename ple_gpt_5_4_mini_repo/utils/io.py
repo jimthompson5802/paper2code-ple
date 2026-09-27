@@ -1,0 +1,369 @@
+"""Utilities for loading configuration and persisting experiment artifacts.
+
+This module provides a minimal, robust I/O layer for the reproduction codebase.
+It is intentionally self-contained to avoid circular imports and to keep config
+handling consistent across training, tuning, and evaluation modules.
+
+Public API:
+  - load_config(path)
+  - save_json(obj, path)
+  - save_pickle(obj, path)
+  - load_pickle(path)
+
+The loader validates the presence of required configuration sections from the
+provided `config.yaml` and returns a nested dictionary structure with the exact
+values from the file.
+"""
+
+from __future__ import annotations
+
+import json
+import pickle
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Iterable, Mapping, MutableMapping, Union
+
+import yaml
+
+
+PathLike = Union[str, Path]
+ConfigDict = Dict[str, Any]
+
+
+_REQUIRED_TOP_LEVEL_KEYS = (
+    "experiment",
+    "data",
+    "training",
+    "hyperparameter_tuning",
+    "models",
+    "evaluation",
+    "baselines",
+)
+
+_REQUIRED_KEY_PATHS = (
+    ("experiment", "seed"),
+    ("experiment", "num_seeds"),
+    ("experiment", "num_ensembles"),
+    ("experiment", "ensemble_group_size"),
+    ("data", "preprocessing", "numerical", "default"),
+    (
+        "data",
+        "preprocessing",
+        "numerical",
+        "otto_group_product_classification",
+    ),
+    ("data", "preprocessing", "categorical", "default"),
+    ("data", "target", "regression_standardization"),
+    ("training", "optimizer"),
+    ("training", "loss", "classification"),
+    ("training", "loss", "regression"),
+    ("training", "learning_rate", "mlp"),
+    ("training", "learning_rate", "resnet"),
+    ("training", "learning_rate", "transformer", "sa_co_mi"),
+    ("training", "learning_rate", "transformer", "other"),
+    ("training", "batch_size", "ge"),
+    ("training", "batch_size", "ch"),
+    ("training", "batch_size", "ca"),
+    ("training", "batch_size", "ho"),
+    ("training", "batch_size", "ad"),
+    ("training", "batch_size", "ot"),
+    ("training", "batch_size", "hi"),
+    ("training", "batch_size", "fb"),
+    ("training", "batch_size", "sa"),
+    ("training", "batch_size", "co"),
+    ("training", "batch_size", "mi"),
+    ("training", "early_stopping", "patience"),
+    ("training", "early_stopping", "min_delta"),
+    ("training", "lr_schedule"),
+    ("training", "max_epochs"),
+    ("hyperparameter_tuning", "method"),
+    ("hyperparameter_tuning", "trials"),
+    ("hyperparameter_tuning", "search_spaces", "linear_embedding_output_dim"),
+    ("hyperparameter_tuning", "search_spaces", "ple_quantiles"),
+    ("hyperparameter_tuning", "search_spaces", "ple_tree", "max_leaves"),
+    ("hyperparameter_tuning", "search_spaces", "ple_tree", "min_items_per_leaf"),
+    (
+        "hyperparameter_tuning",
+        "search_spaces",
+        "ple_tree",
+        "min_information_gain",
+    ),
+    ("hyperparameter_tuning", "search_spaces", "periodic_k"),
+    ("models", "mlp", "layers"),
+    ("models", "mlp", "layer_size"),
+    ("models", "mlp", "dropout"),
+    ("models", "mlp", "weight_decay"),
+    ("models", "resnet", "layers"),
+    ("models", "resnet", "layer_size"),
+    ("models", "resnet", "hidden_factor"),
+    ("models", "resnet", "hidden_dropout"),
+    ("models", "resnet", "residual_dropout"),
+    ("models", "resnet", "weight_decay"),
+    ("models", "transformer", "layers", "sa_co_mi"),
+    ("models", "transformer", "layers", "other"),
+    ("models", "transformer", "embedding_size", "sa_co_mi"),
+    ("models", "transformer", "embedding_size", "other"),
+    ("models", "transformer", "residual_dropout", "sa_co_mi"),
+    ("models", "transformer", "residual_dropout", "other"),
+    ("models", "transformer", "attention_dropout"),
+    ("models", "transformer", "ffn_dropout"),
+    ("models", "transformer", "ffn_factor"),
+    ("models", "transformer", "weight_decay", "sa_co_mi"),
+    ("models", "transformer", "weight_decay", "other"),
+    ("evaluation", "metrics", "classification"),
+    ("evaluation", "metrics", "regression"),
+    ("evaluation", "validation_selection"),
+    ("evaluation", "test_runs_per_tuned_config"),
+    ("baselines", "catboost", "fixed", "early_stopping_rounds"),
+    ("baselines", "catboost", "fixed", "od_pval"),
+    ("baselines", "catboost", "fixed", "iterations"),
+    ("baselines", "catboost", "tuning", "max_depth"),
+    ("baselines", "catboost", "tuning", "learning_rate"),
+    ("baselines", "catboost", "tuning", "bagging_temperature"),
+    ("baselines", "catboost", "tuning", "l2_leaf_reg"),
+    ("baselines", "catboost", "tuning", "leaf_estimation_iterations"),
+    ("baselines", "xgboost", "fixed", "booster"),
+    ("baselines", "xgboost", "fixed", "early_stopping_rounds"),
+    ("baselines", "xgboost", "fixed", "n_estimators"),
+    ("baselines", "xgboost", "tuning", "max_depth"),
+    ("baselines", "xgboost", "tuning", "min_child_weight"),
+    ("baselines", "xgboost", "tuning", "subsample"),
+    ("baselines", "xgboost", "tuning", "learning_rate"),
+    ("baselines", "xgboost", "tuning", "colsample_bytree"),
+    ("baselines", "xgboost", "tuning", "gamma"),
+    ("baselines", "xgboost", "tuning", "lambda"),
+)
+
+
+def _to_path(path: PathLike) -> Path:
+    """Converts a string/path-like input to a `Path` object."""
+    if isinstance(path, Path):
+        return path
+    if isinstance(path, str):
+        return Path(path)
+    raise TypeError(f"Expected path as str or Path, got {type(path).__name__}.")
+
+
+def _get_nested_value(data: Mapping[str, Any], key_path: Iterable[str]) -> Any:
+    """Returns a nested value from a mapping or raises KeyError with context."""
+    current: Any = data
+    traversed_keys = []
+    for key in key_path:
+        traversed_keys.append(key)
+        if not isinstance(current, Mapping):
+            joined = ".".join(traversed_keys[:-1])
+            raise KeyError(
+                f"Expected mapping at '{joined}', but found {type(current).__name__}."
+            )
+        if key not in current:
+            raise KeyError(f"Missing required config key: '{'.'.join(traversed_keys)}'")
+        current = current[key]
+    return current
+
+
+def _validate_config(config: Mapping[str, Any]) -> None:
+    """Validates the loaded config against the expected experiment schema."""
+    if not isinstance(config, Mapping):
+        raise TypeError(
+            f"Configuration must be a mapping, got {type(config).__name__}."
+        )
+
+    for top_key in _REQUIRED_TOP_LEVEL_KEYS:
+        if top_key not in config:
+            raise KeyError(f"Missing required top-level config section: '{top_key}'")
+
+    for key_path in _REQUIRED_KEY_PATHS:
+        _get_nested_value(config, key_path)
+
+    # Consistency checks grounded in the provided config.yaml.
+    num_seeds = int(_get_nested_value(config, ("experiment", "num_seeds")))
+    num_ensembles = int(_get_nested_value(config, ("experiment", "num_ensembles")))
+    ensemble_group_size = int(
+        _get_nested_value(config, ("experiment", "ensemble_group_size"))
+    )
+    if num_seeds != 15:
+        raise ValueError(
+            f"Expected experiment.num_seeds to be 15 for the paper protocol, got {num_seeds}."
+        )
+    if num_ensembles != 3:
+        raise ValueError(
+            f"Expected experiment.num_ensembles to be 3, got {num_ensembles}."
+        )
+    if ensemble_group_size != 5:
+        raise ValueError(
+            f"Expected experiment.ensemble_group_size to be 5, got {ensemble_group_size}."
+        )
+    if num_seeds != num_ensembles * ensemble_group_size:
+        raise ValueError(
+            "Inconsistent ensemble settings: num_seeds must equal "
+            "num_ensembles * ensemble_group_size."
+        )
+
+    lr_schedule = _get_nested_value(config, ("training", "lr_schedule"))
+    if lr_schedule != "none":
+        raise ValueError(
+            f"Expected training.lr_schedule to be 'none', got {lr_schedule!r}."
+        )
+
+    otto_preproc = _get_nested_value(
+        config,
+        ("data", "preprocessing", "numerical", "otto_group_product_classification"),
+    )
+    if otto_preproc != "none":
+        raise ValueError(
+            "Expected Otto Group Product Classification numerical preprocessing to be "
+            f"'none', got {otto_preproc!r}."
+        )
+
+    test_runs = int(
+        _get_nested_value(config, ("evaluation", "test_runs_per_tuned_config"))
+    )
+    if test_runs != num_seeds:
+        raise ValueError(
+            "evaluation.test_runs_per_tuned_config must match experiment.num_seeds "
+            f"({num_seeds}), got {test_runs}."
+        )
+
+
+def _read_text_file(path: Path) -> str:
+    """Reads a UTF-8 text file and returns its contents."""
+    if not path.exists():
+        raise FileNotFoundError(f"Config file does not exist: {path}")
+    if not path.is_file():
+        raise IsADirectoryError(f"Expected a file path, got directory: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def load_config(path: PathLike) -> ConfigDict:
+    """Loads a YAML or JSON configuration file and validates its schema.
+
+    Args:
+      path: Path to a `.yaml`, `.yml`, or `.json` configuration file.
+
+    Returns:
+      A nested dictionary containing the experiment configuration.
+
+    Raises:
+      FileNotFoundError: If the config file does not exist.
+      ValueError: If the file cannot be parsed or fails validation.
+      TypeError: If the parsed content is not a mapping.
+    """
+    config_path = _to_path(path)
+    raw_text = _read_text_file(config_path)
+
+    parsed: Any = None
+    suffix = config_path.suffix.lower()
+
+    try:
+        if suffix in {".yaml", ".yml"}:
+            parsed = yaml.safe_load(raw_text)
+        elif suffix == ".json":
+            parsed = json.loads(raw_text)
+        else:
+            # Try YAML first because it is a superset of JSON in practice.
+            try:
+                parsed = yaml.safe_load(raw_text)
+            except yaml.YAMLError:
+                parsed = json.loads(raw_text)
+    except Exception as exc:  # pragma: no cover - explicit rethrow with context
+        raise ValueError(f"Failed to parse configuration file '{config_path}': {exc}") from exc
+
+    if parsed is None:
+        raise ValueError(f"Configuration file '{config_path}' is empty.")
+    if not isinstance(parsed, Mapping):
+        raise TypeError(
+            f"Configuration root must be a mapping, got {type(parsed).__name__}."
+        )
+
+    config: ConfigDict = dict(parsed)
+    _validate_config(config)
+    return config
+
+
+def _json_default(obj: Any) -> Any:
+    """Best-effort JSON serializer for common scientific Python objects."""
+    if isinstance(obj, Path):
+        return str(obj)
+
+    if hasattr(obj, "item") and callable(getattr(obj, "item")):
+        try:
+            return obj.item()
+        except Exception:
+            pass
+
+    if hasattr(obj, "tolist") and callable(getattr(obj, "tolist")):
+        try:
+            return obj.tolist()
+        except Exception:
+            pass
+
+    if hasattr(obj, "__dict__"):
+        return obj.__dict__
+
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable.")
+
+
+def save_json(obj: Any, path: PathLike) -> None:
+    """Saves an object as JSON, creating parent directories if needed.
+
+    Args:
+      obj: JSON-serializable object or a structure convertible by `_json_default`.
+      path: Destination file path.
+
+    Raises:
+      ValueError: If JSON serialization fails.
+    """
+    json_path = _to_path(path)
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with json_path.open("w", encoding="utf-8") as f:
+            json.dump(
+                obj,
+                f,
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+                default=_json_default,
+            )
+            f.write("\n")
+    except Exception as exc:  # pragma: no cover - explicit rethrow with context
+        raise ValueError(f"Failed to save JSON to '{json_path}': {exc}") from exc
+
+
+def save_pickle(obj: Any, path: PathLike) -> None:
+    """Saves an object to a pickle file, creating parent directories if needed."""
+    pickle_path = _to_path(path)
+    pickle_path.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with pickle_path.open("wb") as f:
+            pickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception as exc:  # pragma: no cover - explicit rethrow with context
+        raise ValueError(f"Failed to save pickle to '{pickle_path}': {exc}") from exc
+
+
+def load_pickle(path: PathLike) -> Any:
+    """Loads a pickled object from disk.
+
+    Args:
+      path: Path to a `.pkl`, `.pickle`, or other pickle-formatted file.
+
+    Returns:
+      The deserialized Python object.
+
+    Raises:
+      FileNotFoundError: If the file does not exist.
+      ValueError: If unpickling fails.
+    """
+    pickle_path = _to_path(path)
+    if not pickle_path.exists():
+        raise FileNotFoundError(f"Pickle file does not exist: {pickle_path}")
+    if not pickle_path.is_file():
+        raise IsADirectoryError(f"Expected a file path, got directory: {pickle_path}")
+
+    try:
+        with pickle_path.open("rb") as f:
+            return pickle.load(f)
+    except Exception as exc:  # pragma: no cover - explicit rethrow with context
+        raise ValueError(f"Failed to load pickle from '{pickle_path}': {exc}") from exc

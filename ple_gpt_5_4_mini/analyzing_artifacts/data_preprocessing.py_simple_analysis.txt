@@ -1,0 +1,398 @@
+## Logic Analysis: `data/preprocessing.py`
+
+This module is responsible for reproducing the paper’s preprocessing protocol exactly and consistently across all model families. It must be aligned with:
+
+- the paper’s preprocessing rules,
+- the shared design for `Preprocessor` and `PreprocessedData`,
+- and the configuration values in `config.yaml`.
+
+It is a shared dependency for:
+
+- deep models: MLP, ResNet, Transformer-L
+- GBDT baselines: CatBoost, XGBoost
+- tuning and final evaluation
+
+Because the paper emphasizes fair comparison, this module must ensure that all downstream components see the same transformed data for a given dataset and experimental setting.
+
+---
+
+### 1) Purpose and responsibilities
+
+`data/preprocessing.py` must implement:
+
+- `Preprocessor.fit(splits)`
+- `Preprocessor.transform(splits)`
+- `Preprocessor.fit_transform(splits)`
+
+Its main responsibilities are:
+
+1. **Apply the correct numerical preprocessing**
+   - default: `quantile_transform`
+   - exception: `otto_group_product_classification -> none`
+
+2. **Apply categorical encoding**
+   - default for non-CatBoost algorithms: `one_hot`
+   - CatBoost must still be able to use raw categorical features, so the module should preserve categorical data in a usable form, even if one-hot is not applied for that path
+
+3. **Standardize regression targets**
+   - enabled by config:
+     - `data.target.regression_standardization: true`
+
+4. **Fit preprocessing only on training data**
+   - transform validation/test using fitted transformers from training only
+   - never fit on validation/test data
+
+5. **Return a unified `PreprocessedData` container**
+   - with train/val/test splits
+   - in a format accepted by both training and baseline pipelines
+
+---
+
+### 2) Required configuration values to honor
+
+All decisions must be driven by `config.yaml`; no values should be invented.
+
+Relevant config keys:
+
+- `data.preprocessing.numerical.default = quantile_transform`
+- `data.preprocessing.numerical.otto_group_product_classification = none`
+- `data.preprocessing.categorical.default = one_hot`
+- `data.target.regression_standardization = true`
+
+Training/evaluation constraints that depend on preprocessing:
+
+- `evaluation.metrics.classification = accuracy`
+- `evaluation.metrics.regression = rmse`
+- `training.loss.classification = cross_entropy`
+- `training.loss.regression = mse`
+
+The preprocessor should not embed any training logic, but it must output labels in a shape and dtype compatible with those loss functions.
+
+---
+
+### 3) Interface and data flow
+
+The design specifies:
+
+- Input: `DatasetSplits`
+- Output: `PreprocessedData`
+
+The module must use the exact data structures from the design and should not introduce incompatible alternatives.
+
+#### Expected input fields from `DatasetSplits`
+
+- `train_df`, `val_df`, `test_df`
+- `y_train`, `y_val`, `y_test`
+- `numerical_cols`
+- `categorical_cols`
+
+The preprocessor should assume that dataset loading has already identified numerical and categorical columns.
+
+#### Expected output fields in `PreprocessedData`
+
+- `x_train_num`, `x_val_num`, `x_test_num`
+- `x_train_cat`, `x_val_cat`, `x_test_cat`
+- `y_train`, `y_val`, `y_test`
+- `num_features`, `cat_features`
+- `feature_metadata`
+
+The output should be usable by:
+
+- the model factory for deep learning models,
+- the GBDT baseline runner,
+- and metrics evaluation.
+
+---
+
+### 4) Preprocessing policy by feature type
+
+## 4.1 Numerical features
+
+### Default policy
+From config and paper:
+
+- use **quantile transformation** for all datasets except Otto Group Product Classification
+
+### Otto exception
+- for `otto_group_product_classification`, do **not** apply numerical preprocessing
+- this means numerical features should be passed through unchanged, apart from any required dtype conversion
+
+### Fit behavior
+The quantile transformer must be fit on the **training numerical features only**.
+
+### Transform behavior
+The fitted transformer is then applied to:
+- training
+- validation
+- test
+
+### Implementation notes
+Use `sklearn.preprocessing.QuantileTransformer` or the closest equivalent consistent with the paper’s description.
+
+Important constraints:
+- fit only on training data
+- preserve deterministic behavior through the global seed utilities
+- ensure outputs are finite and consistent in shape
+
+### Shape handling
+The transformed numerical data should remain 2D:
+- shape: `[n_samples, n_num_features]`
+
+This is critical because all downstream embedding modules expect a dense numeric matrix.
+
+---
+
+## 4.2 Categorical features
+
+### Configured default
+- `data.preprocessing.categorical.default = one_hot`
+
+### Paper rule
+For all non-CatBoost algorithms, categorical features are one-hot encoded.
+
+### Preprocessor responsibility
+The preprocessor should support categorical one-hot encoding as the default output path.
+
+However, because CatBoost uses raw categorical support, the pipeline should preserve the ability to access the unencoded categorical values or separate a CatBoost-compatible path from the one-hot path.
+
+### Practical interpretation for this module
+The safest design, consistent with the shared preprocessing goal, is:
+
+- fit a `OneHotEncoder` on training categorical columns
+- transform val/test with the same encoder
+- produce encoded categorical matrices for deep models and non-CatBoost baselines
+
+But the module must also preserve enough metadata to allow CatBoost to bypass one-hot encoding if the baseline runner needs raw categorical columns. Since the design does not define a separate raw-cat output field, this should be handled through `feature_metadata` and/or by storing the original dataframe columns in a way the baseline runner can access before preprocessing, if required by the broader pipeline.
+
+Because the module design is fixed, do not add public interfaces beyond `fit`, `transform`, and `fit_transform`. Any extra compatibility should be achieved internally through the returned container and metadata.
+
+### Important consistency requirement
+Categorical encoding must be fit using training data only.
+
+---
+
+### 5) Regression target standardization
+
+The config explicitly says:
+
+- `data.target.regression_standardization: true`
+
+The paper states regression targets are standardized for all algorithms.
+
+Therefore:
+
+- if task type is regression, standardize `y_train`
+- apply the same transformation to `y_val` and `y_test`
+- store the fitted target scaler from training only
+
+This affects datasets such as:
+- California Housing
+- House 16H
+- Facebook Comments Volume
+- Covertype? No, Covertype is classification
+- Microsoft MSLR-WEB10K, which the paper treats as regression
+
+### Classification targets
+For classification:
+- do not standardize
+- preserve label encoding as required by the trainer/loss
+- ensure labels are in the expected integer class format
+
+---
+
+### 6) Dataset-specific preprocessing behavior
+
+The module must respect dataset differences in `config.yaml` and paper text.
+
+## 6.1 Otto Group Product Classification
+- numerical preprocessing: `none`
+- categorical features still exist in this dataset
+- deep models and non-CatBoost algorithms still require a consistent representation
+
+## 6.2 All other datasets
+- numerical preprocessing: `quantile_transform`
+- categorical features: one-hot by default for non-CatBoost methods
+
+## 6.3 Microsoft MSLR-WEB10K
+- task is treated as regression in the paper
+- target standardization applies
+- categorical handling depends on the dataset definition from the loader, but preprocessing should not assume a special exception unless the dataset loader provides one
+
+---
+
+### 7) Fit/transform contract
+
+The module must obey standard preprocessing semantics.
+
+## 7.1 `fit(splits)`
+Should:
+
+- inspect `splits.numerical_cols` and `splits.categorical_cols`
+- fit numerical transformer if applicable
+- fit categorical encoder if categorical columns exist
+- fit target scaler if regression standardization is enabled
+- store all fitted transformers internally for later `transform`
+
+It should not mutate the input splits in-place.
+
+## 7.2 `transform(splits)`
+Should:
+
+- apply stored numerical transformer to val/test/train
+- apply stored categorical encoder to val/test/train
+- apply target transformation if regression
+- produce a `PreprocessedData` object
+- convert outputs into the expected container types
+
+## 7.3 `fit_transform(splits)`
+Should:
+- call `fit`
+- then `transform`
+- return `PreprocessedData`
+
+This method is especially useful for the main experiment entrypoint.
+
+---
+
+### 8) Data representation and typing
+
+The module should be strict about the output structure, because the rest of the system expects stable shapes and dtypes.
+
+## 8.1 Numerical arrays
+- should be stored as dense arrays/tensors
+- `float32` is the safest default for PyTorch compatibility
+
+## 8.2 Categorical arrays
+Possible representations depend on whether one-hot encoding is applied:
+
+- if one-hot encoded: dense `float32` or sparse-compatible arrays converted to dense if the downstream model expects it
+- if preserved as raw categories: this should only happen if the broader pipeline explicitly supports it, but the design currently emphasizes one-hot for non-CatBoost
+
+Given the design, returning one-hot encoded categorical tensors is the safer default.
+
+## 8.3 Targets
+- regression: `float32`
+- classification: integer class labels, usually `int64` for PyTorch cross-entropy
+
+## 8.4 Container metadata
+`feature_metadata` should record:
+- original numerical feature names
+- original categorical feature names
+- output dimensionality after preprocessing
+- fitted transformer types
+- whether numerical preprocessing was applied
+- whether regression targets were standardized
+
+This metadata is necessary for downstream model construction and reproducibility logging.
+
+---
+
+### 9) Compatibility with the model pipeline
+
+This module must produce data that matches the assumptions of:
+
+## 9.1 Embedding modules
+- numerical tensors should be 2D dense matrices
+- embeddings operate on per-feature scalar inputs, so numerical preprocessing must not collapse feature structure
+
+## 9.2 MLP/ResNet
+- likely consume concatenated numerical and categorical inputs
+- output from `PreprocessedData` must be compatible with concatenation logic
+
+## 9.3 Transformer-L
+- expects token-like feature representations
+- numerical preprocessing must preserve feature-wise columns
+
+## 9.4 GBDT baselines
+- CatBoost should be able to use categorical variables appropriately
+- XGBoost should receive the standardized, encoded version consistent with the paper’s fair-comparison protocol
+
+---
+
+### 10) Important reproducibility constraints
+
+The paper and config emphasize fair comparison and deterministic behavior.
+
+This module must ensure:
+
+1. **Training-only fitting**
+   - no leakage from val/test
+
+2. **Stable column ordering**
+   - the order of numerical and categorical columns must be preserved consistently across splits
+
+3. **Deterministic transforms**
+   - transformer behavior should be reproducible given the global seed
+
+4. **No hidden preprocessing differences across model families**
+   - the same dataset must use the same preprocessing policy for all deep models, as stated in `notes.implementation_constraints`
+
+5. **Otto exception must be honored exactly**
+   - this is the only explicit numerical-preprocessing exception in config
+
+---
+
+### 11) Recommended internal structure
+
+While the public interface is fixed, internally the module should separate concerns into:
+
+- numerical transformer setup
+- categorical encoder setup
+- target scaler setup
+- split transformation helpers
+- packaging into `PreprocessedData`
+
+This separation will make it easier to keep the logic faithful to the paper and maintainable.
+
+---
+
+### 12) Edge cases to handle
+
+The implementation should be robust to:
+
+- datasets with no categorical columns
+- datasets with no numerical columns
+- constant-valued features
+- missing bins or empty quantiles in preprocessing
+- regression targets with one-dimensional shape
+- classification labels needing integer conversion
+- sparse one-hot outputs that must be converted for PyTorch compatibility
+
+For one-hot encoding, be careful with:
+- unseen categories in validation/test
+- set encoder behavior to ignore unknowns if necessary, while still preserving training-defined feature spaces
+
+---
+
+### 13) What must not be changed
+
+Per the design constraints:
+
+- do **not** change `Preprocessor` public API
+- do **not** invent new public methods
+- do **not** change the `PreprocessedData` interface
+- do **not** introduce preprocessing policies not supported by the paper/config
+- do **not** apply feature preprocessing to Otto numerical features
+- do **not** fit preprocessing on validation/test data
+
+---
+
+### 14) Summary of module behavior
+
+In compact form, `data/preprocessing.py` should implement:
+
+- **Numerical preprocessing**
+  - quantile transform on all datasets except Otto
+  - none for Otto
+
+- **Categorical preprocessing**
+  - one-hot encoding by default for non-CatBoost use
+  - preserve enough structure for fair downstream comparison
+
+- **Target preprocessing**
+  - standardize regression targets when enabled
+
+- **Output**
+  - a `PreprocessedData` object containing train/val/test arrays/tensors and metadata
+
+This module is the bridge between raw dataset splits and all subsequent modeling stages, so correctness here is essential for reproducing the paper’s results faithfully.

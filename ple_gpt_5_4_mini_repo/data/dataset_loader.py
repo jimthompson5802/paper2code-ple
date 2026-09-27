@@ -1,0 +1,605 @@
+## data/dataset_loader.py
+"""Dataset loading and split generation for tabular benchmark reproduction.
+
+This module provides a compact, config-driven `DatasetLoader` that is capable of
+loading the 11 benchmark datasets used in the paper, identifying numerical and
+categorical columns, and producing deterministic train/validation/test splits.
+
+The loader intentionally avoids preprocessing; it only reads raw data and
+constructs split objects for downstream preprocessing and training.
+
+Public API:
+  - DatasetLoader.__init__(config)
+  - DatasetLoader.load_raw()
+  - DatasetLoader.split_data(df)
+  - DatasetLoader.load_and_split()
+
+The implementation favors practical reproducibility:
+  * deterministic splitting with the configured seed
+  * support for dataset-specific file layouts via config.dataset_params
+  * conservative inference of feature types when metadata is not provided
+  * explicit error messages for missing files, columns, or unknown datasets
+
+Expected config shape is the nested dictionary returned by utils.io.load_config.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple, Union
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+
+from utils.reproducibility import set_seed
+
+
+ConfigDict = Dict[str, Any]
+
+
+@dataclass
+class DatasetSplits:
+    """Container for train/validation/test partitions.
+
+    Attributes:
+      train_df: Training features dataframe.
+      val_df: Validation features dataframe.
+      test_df: Test features dataframe.
+      y_train: Training labels/targets.
+      y_val: Validation labels/targets.
+      y_test: Test labels/targets.
+      numerical_cols: Names of numerical feature columns.
+      categorical_cols: Names of categorical feature columns.
+    """
+
+    train_df: pd.DataFrame
+    val_df: pd.DataFrame
+    test_df: pd.DataFrame
+    y_train: np.ndarray
+    y_val: np.ndarray
+    y_test: np.ndarray
+    numerical_cols: List[str]
+    categorical_cols: List[str]
+
+
+@dataclass(frozen=True)
+class _DatasetSpec:
+    """Internal registry entry describing a supported dataset."""
+
+    abbreviation: str
+    target_column: str
+    task_type: str
+    default_filename: str
+    preferred_split_source: str = "config_or_random"
+    fold_required: bool = False
+
+
+class DatasetLoader:
+    """Loads a benchmark dataset and produces deterministic splits.
+
+    The loader supports all datasets referenced in the paper, subject to the
+    presence of files in a configured data root or explicit dataset path.
+
+    Expected configuration conventions:
+      - config["experiment"]["seed"]
+      - config["dataset_params"] (optional)
+      - config["data_root"] or config["dataset_root"] (optional)
+      - dataset-specific path overrides are accepted in config.dataset_params
+
+    The loader is intentionally conservative and does not download data.
+    """
+
+    _SUPPORTED_DATASETS: Dict[str, _DatasetSpec] = {
+        "ge": _DatasetSpec(
+            abbreviation="GE",
+            target_column="target",
+            task_type="multiclass",
+            default_filename="gesture_phase.csv",
+        ),
+        "ch": _DatasetSpec(
+            abbreviation="CH",
+            target_column="Exited",
+            task_type="binary",
+            default_filename="churn_modelling.csv",
+        ),
+        "ca": _DatasetSpec(
+            abbreviation="CA",
+            target_column="MedHouseVal",
+            task_type="regression",
+            default_filename="california_housing.csv",
+        ),
+        "ho": _DatasetSpec(
+            abbreviation="HO",
+            target_column="target",
+            task_type="regression",
+            default_filename="house_16h.csv",
+        ),
+        "ad": _DatasetSpec(
+            abbreviation="AD",
+            target_column="income",
+            task_type="binary",
+            default_filename="adult.csv",
+        ),
+        "ot": _DatasetSpec(
+            abbreviation="OT",
+            target_column="target",
+            task_type="multiclass",
+            default_filename="otto_group_product_classification.csv",
+        ),
+        "hi": _DatasetSpec(
+            abbreviation="HI",
+            target_column="label",
+            task_type="binary",
+            default_filename="higgs_small.csv",
+        ),
+        "fb": _DatasetSpec(
+            abbreviation="FB",
+            target_column="target",
+            task_type="regression",
+            default_filename="facebook_comments_volume.csv",
+        ),
+        "sa": _DatasetSpec(
+            abbreviation="SA",
+            target_column="target",
+            task_type="binary",
+            default_filename="santander_customer_transaction_prediction.csv",
+        ),
+        "co": _DatasetSpec(
+            abbreviation="CO",
+            target_column="Cover_Type",
+            task_type="multiclass",
+            default_filename="covertype.csv",
+        ),
+        "mi": _DatasetSpec(
+            abbreviation="MI",
+            target_column="target",
+            task_type="regression",
+            default_filename="mslr_web10k_fold1.csv",
+            fold_required=True,
+        ),
+    }
+
+    def __init__(self, config: Mapping[str, Any]) -> None:
+        """Initializes the dataset loader.
+
+        Args:
+          config: Experiment configuration mapping.
+
+        Raises:
+          KeyError: If required configuration fields are missing.
+          TypeError: If config is not mapping-like.
+        """
+        if not isinstance(config, Mapping):
+            raise TypeError(
+                f"Expected config to be a mapping, got {type(config).__name__}."
+            )
+        self._config: Dict[str, Any] = dict(config)
+        self._seed: int = int(self._config["experiment"]["seed"])
+        self._dataset_name: str = str(self._get_dataset_name()).lower()
+        self._dataset_params: Dict[str, Any] = dict(self._config.get("dataset_params", {}))
+        self._spec: _DatasetSpec = self._get_dataset_spec(self._dataset_name)
+        self._data_root: Path = self._resolve_data_root()
+
+        # Seed once for any downstream randomized fallback behavior.
+        set_seed(self._seed)
+
+    def load_raw(self) -> pd.DataFrame:
+        """Loads the raw dataset as a pandas DataFrame.
+
+        Returns:
+          A DataFrame containing features and target column.
+
+        Raises:
+          FileNotFoundError: If the expected dataset file is missing.
+          ValueError: If the file cannot be parsed or the target column is absent.
+        """
+        file_path: Path = self._resolve_dataset_path()
+
+        if not file_path.exists():
+            raise FileNotFoundError(
+                f"Dataset file not found for '{self._dataset_name}'. Expected: {file_path}"
+            )
+        if not file_path.is_file():
+            raise FileNotFoundError(
+                f"Expected a dataset file for '{self._dataset_name}', but found directory: {file_path}"
+            )
+
+        suffix: str = file_path.suffix.lower()
+        if suffix in {".csv", ".txt", ".tsv"}:
+            sep: str = self._infer_separator(file_path)
+            df: pd.DataFrame = pd.read_csv(file_path, sep=sep)
+        elif suffix in {".parquet"}:
+            df = pd.read_parquet(file_path)
+        elif suffix in {".feather"}:
+            df = pd.read_feather(file_path)
+        else:
+            # Default to CSV-like parsing because most benchmark datasets are stored that way.
+            sep = self._infer_separator(file_path)
+            df = pd.read_csv(file_path, sep=sep)
+
+        df = self._normalize_column_names(df)
+        target_column = self._resolve_target_column(df)
+        if target_column not in df.columns:
+            raise ValueError(
+                f"Target column '{target_column}' is missing for dataset '{self._dataset_name}'. "
+                f"Available columns: {list(df.columns)}"
+            )
+
+        return df
+
+    def split_data(self, df: pd.DataFrame) -> DatasetSplits:
+        """Splits the raw dataframe into train/validation/test partitions.
+
+        The split is deterministic for a given seed and dataset name. If explicit
+        split indices or split ratios are supplied in config.dataset_params, they
+        are respected. Otherwise, a standard 60/20/20 split is used.
+
+        Args:
+          df: Raw dataframe containing features and target.
+
+        Returns:
+          DatasetSplits object with aligned features, targets, and column metadata.
+        """
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError(f"Expected df to be a pandas DataFrame, got {type(df).__name__}.")
+
+        target_column: str = self._resolve_target_column(df)
+        if target_column not in df.columns:
+            raise ValueError(
+                f"Target column '{target_column}' is missing for dataset '{self._dataset_name}'."
+            )
+
+        numerical_cols, categorical_cols = self._resolve_feature_columns(df, target_column)
+        feature_df = df.drop(columns=[target_column]).copy()
+        target_series = df[target_column].copy()
+
+        # If explicit split indices exist, use them.
+        explicit_splits = self._load_explicit_splits_if_available(df.index)
+        if explicit_splits is not None:
+            train_idx, val_idx, test_idx = explicit_splits
+            train_df = feature_df.loc[train_idx].reset_index(drop=True)
+            val_df = feature_df.loc[val_idx].reset_index(drop=True)
+            test_df = feature_df.loc[test_idx].reset_index(drop=True)
+            y_train = target_series.loc[train_idx].to_numpy()
+            y_val = target_series.loc[val_idx].to_numpy()
+            y_test = target_series.loc[test_idx].to_numpy()
+            return DatasetSplits(
+                train_df=train_df,
+                val_df=val_df,
+                test_df=test_df,
+                y_train=y_train,
+                y_val=y_val,
+                y_test=y_test,
+                numerical_cols=numerical_cols,
+                categorical_cols=categorical_cols,
+            )
+
+        # Deterministic 60/20/20 split. Stratify only for classification tasks.
+        task_type = self._spec.task_type
+        stratify_values: Optional[pd.Series]
+        if task_type in {"binary", "multiclass"}:
+            stratify_values = target_series
+        else:
+            stratify_values = None
+
+        split_ratio_config = self._dataset_params.get("split_ratios", {})
+        train_ratio = float(split_ratio_config.get("train", 0.6))
+        val_ratio = float(split_ratio_config.get("val", 0.2))
+        test_ratio = float(split_ratio_config.get("test", 0.2))
+        self._validate_split_ratios(train_ratio, val_ratio, test_ratio)
+
+        # First split: train vs temp.
+        temp_ratio = val_ratio + test_ratio
+        x_train, x_temp, y_train, y_temp = train_test_split(
+            feature_df,
+            target_series,
+            test_size=temp_ratio,
+            random_state=self._seed,
+            shuffle=True,
+            stratify=stratify_values,
+        )
+
+        # Second split: validation vs test.
+        if task_type in {"binary", "multiclass"}:
+            stratify_temp = y_temp
+        else:
+            stratify_temp = None
+
+        relative_test_size = test_ratio / temp_ratio if temp_ratio > 0 else 0.5
+        x_val, x_test, y_val, y_test = train_test_split(
+            x_temp,
+            y_temp,
+            test_size=relative_test_size,
+            random_state=self._seed,
+            shuffle=True,
+            stratify=stratify_temp,
+        )
+
+        train_df = x_train.reset_index(drop=True)
+        val_df = x_val.reset_index(drop=True)
+        test_df = x_test.reset_index(drop=True)
+
+        return DatasetSplits(
+            train_df=train_df,
+            val_df=val_df,
+            test_df=test_df,
+            y_train=np.asarray(y_train),
+            y_val=np.asarray(y_val),
+            y_test=np.asarray(y_test),
+            numerical_cols=numerical_cols,
+            categorical_cols=categorical_cols,
+        )
+
+    def load_and_split(self) -> DatasetSplits:
+        """Convenience wrapper that loads the dataset and returns its splits."""
+        raw_df = self.load_raw()
+        return self.split_data(raw_df)
+
+    def _get_dataset_name(self) -> str:
+        """Extracts the dataset name from the configuration."""
+        dataset_name = self._config.get("dataset_name")
+        if dataset_name is None:
+            dataset_name = self._config.get("experiment", {}).get("dataset_name")
+        if dataset_name is None:
+            dataset_name = self._dataset_params.get("dataset_name")
+        if dataset_name is None:
+            raise KeyError(
+                "Missing dataset name. Expected config['dataset_name'] or "
+                "config['experiment']['dataset_name'] or config['dataset_params']['dataset_name']."
+            )
+        return str(dataset_name)
+
+    def _get_dataset_spec(self, dataset_name: str) -> _DatasetSpec:
+        """Returns the internal dataset spec for a given dataset name."""
+        key = dataset_name.lower()
+        if key not in self._SUPPORTED_DATASETS:
+            raise ValueError(
+                f"Unknown dataset '{dataset_name}'. Supported datasets: "
+                f"{sorted(self._SUPPORTED_DATASETS.keys())}"
+            )
+        return self._SUPPORTED_DATASETS[key]
+
+    def _resolve_data_root(self) -> Path:
+        """Resolves the base directory for dataset files."""
+        candidate_roots: List[Optional[Union[str, Path]]] = [
+            self._dataset_params.get("data_dir"),
+            self._dataset_params.get("data_root"),
+            self._config.get("data_dir"),
+            self._config.get("data_root"),
+            self._config.get("dataset_root"),
+        ]
+        for candidate in candidate_roots:
+            if candidate is not None and str(candidate).strip():
+                return Path(candidate).expanduser().resolve()
+        return Path("data").resolve()
+
+    def _resolve_dataset_path(self) -> Path:
+        """Resolves the raw dataset file path.
+
+        The lookup order is:
+          1) explicit config.dataset_params['path']
+          2) explicit config.dataset_params['file_path']
+          3) data root + dataset-specific file name
+        """
+        explicit_path = self._dataset_params.get("path")
+        if explicit_path is None:
+            explicit_path = self._dataset_params.get("file_path")
+        if explicit_path is not None and str(explicit_path).strip():
+            return Path(explicit_path).expanduser().resolve()
+
+        filename = self._dataset_params.get("filename", self._spec.default_filename)
+        filename = str(filename)
+
+        dataset_subdir = self._dataset_params.get("subdir")
+        if dataset_subdir is not None and str(dataset_subdir).strip():
+            return (self._data_root / str(dataset_subdir) / filename).resolve()
+
+        # Special handling for fold-aware Microsoft layout.
+        if self._spec.fold_required:
+            fold = self._dataset_params.get("fold", 1)
+            fold = int(fold) if fold is not None else 1
+            possible_names = [
+                f"mslr_web10k_fold{fold}.csv",
+                f"mslr_web10k_fold{fold}.txt",
+                f"mslr-web10k-fold{fold}.csv",
+                f"Fold{fold}.csv",
+                f"Fold{fold}.txt",
+                filename,
+            ]
+            for name in possible_names:
+                candidate = (self._data_root / self._dataset_name / name).resolve()
+                if candidate.exists():
+                    return candidate
+            return (self._data_root / self._dataset_name / filename).resolve()
+
+        return (self._data_root / self._dataset_name / filename).resolve()
+
+    def _resolve_target_column(self, df: pd.DataFrame) -> str:
+        """Resolves the target column name, allowing config overrides."""
+        explicit_target = self._dataset_params.get("target_column")
+        if explicit_target is not None and str(explicit_target).strip():
+            return str(explicit_target)
+        return self._spec.target_column
+
+    def _resolve_feature_columns(
+        self, df: pd.DataFrame, target_column: str
+    ) -> Tuple[List[str], List[str]]:
+        """Determines numerical and categorical feature columns.
+
+        Preference order:
+          1) dataset_params explicit numerical/categorical lists
+          2) dtype-based inference
+        """
+        explicit_numerical = self._dataset_params.get("numerical_cols")
+        explicit_categorical = self._dataset_params.get("categorical_cols")
+
+        if explicit_numerical is not None or explicit_categorical is not None:
+            numerical_cols = list(explicit_numerical or [])
+            categorical_cols = list(explicit_categorical or [])
+            all_features = [c for c in df.columns if c != target_column]
+
+            # Validate membership and preserve original column order.
+            numerical_set = set(numerical_cols)
+            categorical_set = set(categorical_cols)
+            unknown = (numerical_set | categorical_set) - set(all_features)
+            if unknown:
+                raise ValueError(
+                    f"Explicit feature columns for dataset '{self._dataset_name}' "
+                    f"contain unknown columns: {sorted(unknown)}"
+                )
+
+            if numerical_set & categorical_set:
+                overlap = sorted(numerical_set & categorical_set)
+                raise ValueError(
+                    f"Feature columns overlap between numerical and categorical lists "
+                    f"for dataset '{self._dataset_name}': {overlap}"
+                )
+
+            # Fill in any unspecified columns using dtype inference.
+            for column in all_features:
+                if column in numerical_set or column in categorical_set:
+                    continue
+                if self._is_categorical_dtype(df[column]):
+                    categorical_cols.append(column)
+                else:
+                    numerical_cols.append(column)
+
+            numerical_cols = [c for c in all_features if c in set(numerical_cols)]
+            categorical_cols = [c for c in all_features if c in set(categorical_cols)]
+            return numerical_cols, categorical_cols
+
+        numerical_cols: List[str] = []
+        categorical_cols: List[str] = []
+        for column in df.columns:
+            if column == target_column:
+                continue
+            if self._is_categorical_dtype(df[column]):
+                categorical_cols.append(column)
+            else:
+                numerical_cols.append(column)
+        return numerical_cols, categorical_cols
+
+    def _is_categorical_dtype(self, series: pd.Series) -> bool:
+        """Returns True if the series should be treated as categorical."""
+        return bool(
+            pd.api.types.is_object_dtype(series)
+            or pd.api.types.is_categorical_dtype(series)
+            or pd.api.types.is_string_dtype(series)
+            or pd.api.types.is_bool_dtype(series)
+        )
+
+    def _load_explicit_splits_if_available(
+        self, index: pd.Index
+    ) -> Optional[Tuple[pd.Index, pd.Index, pd.Index]]:
+        """Loads predefined splits from config if available.
+
+        Supported config conventions:
+          - dataset_params['split_indices'] with keys train/val/test
+          - dataset_params['split_file'] pointing to a pickle/npz/csv file
+
+        The method returns None if no explicit split specification is present.
+        """
+        split_indices = self._dataset_params.get("split_indices")
+        if split_indices is not None:
+            if not isinstance(split_indices, Mapping):
+                raise TypeError(
+                    f"dataset_params['split_indices'] must be a mapping for dataset "
+                    f"'{self._dataset_name}'."
+                )
+            train_idx = pd.Index(split_indices.get("train", []))
+            val_idx = pd.Index(split_indices.get("val", []))
+            test_idx = pd.Index(split_indices.get("test", []))
+            if len(train_idx) == 0 or len(val_idx) == 0 or len(test_idx) == 0:
+                raise ValueError(
+                    f"Explicit split_indices provided for dataset '{self._dataset_name}', "
+                    "but one or more partitions are empty."
+                )
+            return train_idx, val_idx, test_idx
+
+        split_file = self._dataset_params.get("split_file")
+        if split_file is None:
+            return None
+
+        split_path = Path(split_file).expanduser().resolve()
+        if not split_path.exists():
+            raise FileNotFoundError(
+                f"Split file for dataset '{self._dataset_name}' not found: {split_path}"
+            )
+
+        suffix = split_path.suffix.lower()
+        if suffix in {".pkl", ".pickle"}:
+            import pickle
+
+            with split_path.open("rb") as f:
+                obj = pickle.load(f)
+        elif suffix == ".npz":
+            obj = np.load(split_path, allow_pickle=True)
+        elif suffix in {".csv", ".tsv"}:
+            sep = "\t" if suffix == ".tsv" else ","
+            obj = pd.read_csv(split_path, sep=sep)
+        else:
+            raise ValueError(
+                f"Unsupported split file format for dataset '{self._dataset_name}': {split_path}"
+            )
+
+        if isinstance(obj, Mapping):
+            train_idx = pd.Index(obj.get("train", []))
+            val_idx = pd.Index(obj.get("val", []))
+            test_idx = pd.Index(obj.get("test", []))
+            return train_idx, val_idx, test_idx
+
+        if isinstance(obj, np.lib.npyio.NpzFile):
+            train_idx = pd.Index(obj["train"])
+            val_idx = pd.Index(obj["val"])
+            test_idx = pd.Index(obj["test"])
+            return train_idx, val_idx, test_idx
+
+        if isinstance(obj, pd.DataFrame):
+            required_columns = {"split", "index"}
+            if not required_columns.issubset(set(obj.columns)):
+                raise ValueError(
+                    f"CSV split file for dataset '{self._dataset_name}' must contain columns "
+                    f"{sorted(required_columns)}."
+                )
+            train_idx = pd.Index(obj.loc[obj["split"] == "train", "index"])
+            val_idx = pd.Index(obj.loc[obj["split"] == "val", "index"])
+            test_idx = pd.Index(obj.loc[obj["split"] == "test", "index"])
+            return train_idx, val_idx, test_idx
+
+        raise TypeError(
+            f"Unsupported split file object type for dataset '{self._dataset_name}': "
+            f"{type(obj).__name__}"
+        )
+
+    def _normalize_column_names(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Normalizes column names without changing order."""
+        normalized_df = df.copy()
+        normalized_df.columns = [str(column).strip() for column in normalized_df.columns]
+        return normalized_df
+
+    def _infer_separator(self, file_path: Path) -> str:
+        """Infers a file separator from the extension and file contents."""
+        suffix = file_path.suffix.lower()
+        if suffix == ".tsv":
+            return "\t"
+        if suffix == ".txt":
+            return "\t"
+
+        # Heuristic for CSV-like files: use comma by default.
+        # This keeps behavior predictable for benchmark files.
+        return ","
+
+    def _validate_split_ratios(self, train_ratio: float, val_ratio: float, test_ratio: float) -> None:
+        """Validates split ratios."""
+        ratios = [train_ratio, val_ratio, test_ratio]
+        if any(r <= 0.0 for r in ratios):
+            raise ValueError(
+                f"Split ratios must be positive; got train={train_ratio}, val={val_ratio}, test={test_ratio}."
+            )
+        total = train_ratio + val_ratio + test_ratio
+        if not np.isclose(total, 1.0):
+            raise ValueError(
+                f"Split ratios must sum to 1.0; got train={train_ratio}, val={val_ratio}, test={test_ratio}."
+            )

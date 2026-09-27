@@ -1,0 +1,61 @@
+----------------------------------------
+[Required packages]
+- numpy==1.26.4
+- pandas==2.2.2
+- scikit-learn==1.5.1
+- torch==2.3.1
+- optuna==3.6.1
+- pyyaml==6.0.2
+- tqdm==4.66.5
+- catboost==1.2.7
+- xgboost==2.1.1
+- joblib==1.4.2
+
+----------------------------------------
+[Required Other language third-party packages]
+- No third-party dependencies required
+
+----------------------------------------
+[Logic Analysis]
+- ['utils/reproducibility.py', 'Provides set_seed(seed), set_deterministic(), and get_device(device). This module must be implemented first because every training, tuning, and evaluation path depends on deterministic seeding and device selection. It should also centralize random control for Python, NumPy, and PyTorch. Imports: random, os, numpy, torch.']
+- ['utils/io.py', 'Provides load_config(path), save_json(obj, path), save_pickle(obj, path), load_pickle(path). This module supports config-driven reproduction and saving tuned parameters, metrics, checkpoints, and predictions. It should parse YAML/JSON configs into a typed experiment config dict/object. Imports: json, yaml, pathlib, pickle, dataclasses or pydantic optionally.']
+- ['data/dataset_loader.py', 'Implements DatasetLoader with load_raw(), split_data(df), and load_and_split(). This is responsible for obtaining the 11 benchmark datasets, mapping dataset-specific column names, identifying numerical/categorical features, and reproducing the train/validation/test split protocol. It depends on config, reproducibility utilities, and may internally use pandas and scikit-learn. For Microsoft MSLR-WEB10K, it should support fold-based loading. For the other datasets, it should support either local files or download hooks. Imports: pandas, numpy, sklearn.model_selection, pathlib, os.']
+- ['data/preprocessing.py', 'Implements Preprocessor with fit(), transform(), and fit_transform(). This module must apply the paper’s preprocessing policy: quantile transformation for all datasets except Otto, standardization for regression targets, and one-hot encoding for categorical features for non-CatBoost methods. It should output tensors or arrays in a unified PreprocessedData container. It is a key shared dependency for both deep models and GBDT baselines. Imports: sklearn.preprocessing, numpy, pandas, torch, joblib.']
+- ['models/embeddings.py', 'Defines BaseEmbedding and concrete embedding modules: LinearEmbedding, PiecewiseLinearEmbedding, PeriodicEmbedding, plus an EmbeddingFactory. This is the core methodological module. PiecewiseLinearEmbedding must support quantile-based and target-aware bin construction, per-feature independent bins, and PLE encoding per scalar value. PeriodicEmbedding must support trainable per-feature periodic transforms with sigma and k hyperparameters. LinearEmbedding should implement the bias-free linear mapping used throughout the paper. Imports: torch, torch.nn, numpy, sklearn.tree or sklearn binning utilities.']
+- ['models/backbones.py', 'Defines backbone networks: MLPBackbone, ResNetBackbone, TransformerBackbone. These backbones should follow the tabular benchmark style from Gorishniy et al. and accept embedded numerical tokens or concatenated vectors. TransformerBackbone should be compatible with FT-Transformer style feature tokens. Imports: torch, torch.nn, torch.nn.functional, math.']
+- ['models/tabular_model.py', 'Defines TabularModel and ModelFactory. This module composes an embedding module, a backbone, and the prediction head. It must map the model naming scheme (e.g., MLP-Q-LR, Transformer-PLR, ResNet-T-LR) to actual component stacks. It also must handle regression vs classification output heads and forward(x_num, x_cat) routing. Imports: torch, models.embeddings, models.backbones.']
+- ['training/trainer.py', 'Defines Trainer for one model-run. It must implement the full training loop: AdamW optimization, loss selection based on task, validation every epoch, early stopping with patience=16, checkpointing best validation weights, and final test inference. It also should expose fit_one_epoch(), validate(), train(), save_checkpoint(), and load_best_checkpoint(). This file depends on the model, data containers, and reproducibility utilities. Imports: torch, torch.optim, tqdm, numpy, os.']
+- ['training/tuning.py', 'Defines Tuner and Optuna objective logic. It should sample hyperparameters exactly as specified in the paper for each model family, run one training trial, report validation score, and return the best config. It must encode dataset-specific search spaces for MLP, ResNet, Transformer-L, PLE bins, periodic hyperparameters, and embedding output sizes. Depends on Trainer, ModelFactory, and MetricsEvaluator. Imports: optuna, copy, typing, numpy.']
+- ['evaluation/metrics.py', 'Defines MetricsEvaluator with compute_classification(), compute_regression(), and select_metric(). It must map the task to accuracy or RMSE, and support ranking-like regression for Microsoft. Should also compute per-seed summary statistics. Imports: numpy, sklearn.metrics.']
+- ['evaluation/ensemble.py', 'Defines EnsembleEvaluator for the paper’s 3-way ensemble setup. It should accept predictions from 15 trained seeds, partition them into 3 groups of 5, average predictions within each group, and compute the final ensemble metric. Imports: numpy, evaluation.metrics.']
+- ['baselines/gbdt.py', 'Defines GBDDBaselineRunner with run_catboost() and run_xgboost(). This module reproduces the comparison baselines and must respect dataset-specific settings such as GPU usage for MI and CO in XGBoost tuning, CatBoost categorical support, and the hyperparameter ranges reported in the appendix. Imports: catboost, xgboost, numpy, pandas, sklearn metrics.']
+- ['main.py', 'The entrypoint orchestrates the whole experiment lifecycle: load config, set seed, load and preprocess data, optionally tune hyperparameters, train the selected model across 15 seeds, evaluate on the test set, optionally build ensembles, optionally run CatBoost/XGBoost baselines, and save results. It should be the only command a user needs for a full reproduction run. Imports: all modules above.']
+
+----------------------------------------
+[Task list]
+- utils/reproducibility.py
+- utils/io.py
+- data/dataset_loader.py
+- data/preprocessing.py
+- models/embeddings.py
+- models/backbones.py
+- models/tabular_model.py
+- training/trainer.py
+- training/tuning.py
+- evaluation/metrics.py
+- evaluation/ensemble.py
+- baselines/gbdt.py
+- main.py
+
+----------------------------------------
+[Full API spec]
+
+
+----------------------------------------
+[Shared Knowledge]
+The whole system should share a single experiment configuration schema containing dataset_name, model_name, task_type, seed, num_trials, patience, device, and nested dictionaries for dataset/model/train/tuning parameters. The preprocessing module and trainer must agree on tensor shapes and label formatting. The embedding and backbone modules must agree on the interface: embeddings consume numerical tensors and output either concatenated vectors (for MLP/ResNet) or token sequences (for Transformer). The ModelFactory should use a common model naming convention so that a string like MLP-Q-LR or Transformer-T-LR maps deterministically to the correct embedding stack. All experiment scripts should use the same random seed utility, and all metrics should be computed through a single evaluator to avoid inconsistencies across tuning, final test evaluation, and ensemble evaluation. GBDT baselines should reuse the same split indices and target preprocessing so that comparisons are fair.
+
+----------------------------------------
+[Anything UNCLEAR]
+The exact source and split generation procedure for each dataset is not fully specified in the provided text, especially the original split script from Gorishniy et al. and the fold handling for Microsoft MSLR-WEB10K. The precise periodic embedding equation and the search space for sigma are also not fully visible in the parsed paper text. If exact replication is required, these points should be confirmed from the authors’ supplementary material or original code repository.
+

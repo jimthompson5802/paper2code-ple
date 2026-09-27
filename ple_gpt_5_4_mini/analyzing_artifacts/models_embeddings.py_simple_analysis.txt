@@ -1,0 +1,551 @@
+# Logic Analysis: `models/embeddings.py`
+
+This module is the core methodological component of the reproduction. It must implement the numerical-feature embedding mechanisms used throughout the paper, while respecting the paper’s key constraint that **each numerical feature is embedded independently** and **parameters are never shared across features**.
+
+The file must define:
+
+- `BaseEmbedding`
+- `LinearEmbedding`
+- `PiecewiseLinearEmbedding`
+- `PeriodicEmbedding`
+- `EmbeddingFactory`
+
+It must also support the model composition patterns used in the experiments, especially:
+
+- `MLP-L`, `MLP-LR`, `MLP-LRLR`
+- `MLP-Q`, `MLP-Q-LR`, `MLP-Q-LRLR`
+- `MLP-T`, `MLP-T-LR`, `MLP-T-LRLR`
+- `MLP-P`, `MLP-PL`, `MLP-PLR`
+- analogous variants for `ResNet` and `Transformer-L`
+
+Below is the logic analysis for how to implement this module correctly and reproducibly.
+
+---
+
+## 1) Core design constraints from the paper
+
+### 1.1 Feature-wise independent embeddings
+The paper explicitly states:
+
+- each numerical feature `x_i` is embedded independently
+- all features use the same functional form
+- parameters are not shared between features
+
+This means the implementation must avoid:
+- any layer that mixes numerical features before embedding
+- any shared embedding table or shared binning parameters across features
+
+Each feature needs its own embedding path, even if the module class is the same.
+
+### 1.2 Output usage depends on backbone
+The paper distinguishes how embeddings are consumed:
+
+- **MLP/ResNet-like backbones**: concatenate all feature embeddings into one flat vector
+- **Transformer-like backbones**: keep embeddings as a token sequence
+
+So `embeddings.py` must expose output in a way that downstream backbones can use consistently. The module should not decide final model usage; it should only produce:
+- per-feature embeddings
+- either stacked token embeddings or flattened vectors depending on the wrapper’s request
+
+Because `tabular_model.py` is responsible for backbone composition, this module should focus on embedding generation and return a consistent tensor shape that the wrapper can consume.
+
+### 1.3 Same embedding family across all features
+The paper says:
+- no feature-specific functional form variation
+- no sharing of parameters between feature embeddings
+
+So for example, PLE should be the same type for every feature, but each feature can have its own bins.
+
+---
+
+## 2) Expected interfaces and internal responsibilities
+
+Although the exact method signatures are not shown in the paper, the module should support the data flow implied by the design:
+
+### `BaseEmbedding`
+A lightweight abstract base class defining the common interface for numerical embeddings.
+
+Responsibilities:
+- store metadata like `num_features`, `output_dim`
+- define `forward(x)` contract
+- optionally define utility methods for shape validation
+
+### `LinearEmbedding`
+Implements the “bias-free linear layer” embedding module used in the paper.
+
+Responsibilities:
+- apply a separate linear transform to each scalar feature
+- no bias in the linear mapping
+- each feature should have its own parameters unless the wrapper intentionally uses a shared projection per feature value representation
+- output embedding dimension should be tunable from config/search space
+
+Important: the paper says `Linear` denotes a **bias-free linear layer**. This should be interpreted literally.
+
+### `PiecewiseLinearEmbedding`
+Implements PLE, including both:
+- quantile-based binning
+- target-aware binning
+
+Responsibilities:
+- build per-feature bins using training data only
+- encode each scalar value into a piecewise-linear vector of length `T_i`
+- optionally map the PLE vector to an embedding dimension using a bias-free linear layer, especially for Transformer-style models
+- preserve feature independence
+
+### `PeriodicEmbedding`
+Implements the periodic activation embedding described in the paper.
+
+Responsibilities:
+- per-feature periodic transform
+- trainable coefficients initialized from `N(0, sigma)`
+- support tunable `sigma` and `k`
+- do not mix features during periodic embedding
+- output should be compatible with both flat and token-style downstream consumption
+
+### `EmbeddingFactory`
+Maps model names and config settings to the correct embedding class and variant.
+
+Responsibilities:
+- interpret names like `L`, `Q`, `T`, `P`, `PL`, `PLR`
+- create the correct embedding module according to backbone and embedding suffix
+- enforce dataset-specific or model-specific parameter choices coming from `config.yaml`
+
+---
+
+## 3) Configuration-driven behavior
+
+This module must strictly reference `config.yaml` and not invent values.
+
+### Relevant config keys
+From the provided config:
+
+#### Hyperparameter tuning
+- `hyperparameter_tuning.search_spaces.linear_embedding_output_dim: [1, 128]`
+- `hyperparameter_tuning.search_spaces.ple_quantiles: [2, 256]`
+- `hyperparameter_tuning.search_spaces.ple_tree.max_leaves: [2, 256]`
+- `hyperparameter_tuning.search_spaces.ple_tree.min_items_per_leaf: [1, 128]`
+- `hyperparameter_tuning.search_spaces.ple_tree.min_information_gain: [1.0e-09, 0.01]`
+- `hyperparameter_tuning.search_spaces.periodic_k: [1, 128]`
+
+#### Model settings
+- MLP layer search ranges
+- ResNet layer search ranges
+- Transformer-specific hyperparameter ranges
+
+#### Training
+- `training.optimizer = adamw`
+- `training.early_stopping.patience = 16`
+- `training.max_epochs = 100`
+- `training.lr_schedule = none`
+
+#### Data preprocessing
+- numerical default = quantile transform
+- Otto = none
+- categorical default = one_hot
+
+### Important implications for embeddings
+- `PiecewiseLinearEmbedding` should not assume a fixed number of bins; this must be tunable and constructed from config-driven search spaces.
+- `PeriodicEmbedding` must use `k` from the search space.
+- `LinearEmbedding` output dimension must be tunable from the corresponding search space.
+- For PLE target-aware bins, the three tree parameters are the only tunable ones explicitly provided.
+- No extra hidden defaults should be introduced unless required for shape compatibility by the paper’s architecture.
+
+---
+
+## 4) `LinearEmbedding` logic
+
+### 4.1 What it represents
+The paper’s `Linear` module is a bias-free linear projection. It is used as:
+- a simple numerical feature embedding baseline
+- a post-PLE projection for Transformer-like models
+- a cheap way to add expressivity
+
+### 4.2 Functional behavior
+For each numerical feature scalar `x_i`, apply a learned linear transform to map it to a dense vector.
+
+Implementation logic:
+- input shape: `[batch_size, num_features]`
+- per-feature independent scalar-to-vector projection
+- output shape:
+  - for MLP/ResNet: flattened or concatenated representation
+  - for Transformer: one token per feature, each token vector size `output_dim`
+
+### 4.3 Important constraints
+- no bias term
+- no activation inside the embedding itself
+- if used as a “post-PLE” layer, it must accept PLE vectors as input
+- the paper notes that MLP-L can be fused with the first backbone linear layer after training; this means the module should be a plain linear mapping, not a composite block
+
+### 4.4 Practical shape considerations
+There are two possible interpretation layers:
+1. **Scalar-to-vector per feature**
+2. **Vector-to-vector projection when applied after PLE**
+
+The module should support both use cases through consistent internal design, but the public interface should remain unified and be used by `EmbeddingFactory` according to model variant.
+
+---
+
+## 5) `PiecewiseLinearEmbedding` logic
+
+This is the most important and nuanced part of the module.
+
+## 5.1 PLE concept
+PLE encodes a scalar value into a vector of length `T` representing its relative location among bins.
+
+For a value `x` and bin boundaries:
+- values below a bin contribute `0`
+- values above a bin contribute `1`
+- values inside the active bin are interpolated linearly
+
+This yields an ordered, continuous, piecewise-linear representation.
+
+## 5.2 Per-feature bin construction
+The paper is explicit that:
+- bins are feature-specific
+- bins are built independently
+- no parameter sharing across features
+
+So the class must store:
+- one bin boundary set per feature
+- one encoding configuration per feature
+
+This means `PiecewiseLinearEmbedding` needs internal structures like:
+- list of boundaries per feature
+- one encoder per feature
+- possibly one post-encoding linear transform per feature if used in Transformer mode
+
+## 5.3 Quantile-based bins
+This corresponds to `PLE-q`.
+
+According to the paper:
+- compute empirical quantiles from the **training set only**
+- use the same number of quantiles for all features
+- remove trivial zero-size bins
+
+From config:
+- `ple_quantiles: [2, 256]`
+
+Logic:
+1. during `fit`, receive training numerical matrix
+2. for each feature:
+   - compute quantile boundaries on training values
+   - discard duplicate boundaries
+   - store boundaries
+3. during `forward`, convert each scalar into PLE vector using these boundaries
+
+### Key reproducibility point
+Quantiles must be learned only from training data to avoid leakage.
+
+## 5.4 Target-aware bins
+This corresponds to `PLE-t`.
+
+According to the paper:
+- construct bins using a supervised decision-tree-like discretization
+- equivalent in spirit to C4.5 discretization
+- the bins are obtained by recursively splitting a single feature using target information
+- store `b_0 = min(x)` and `b_T = max(x)`
+
+From config:
+- `max_leaves`
+- `min_items_per_leaf`
+- `min_information_gain`
+
+Logic:
+1. for each feature independently:
+   - fit a 1D decision tree on feature values and target
+   - use the tree’s leaf partition as bins
+2. store split boundaries
+3. derive bins from these boundaries
+4. apply PLE encoding using those bins
+
+### Important implementation note
+The tree is not a full multivariate tree. It is a **per-feature 1D discretizer**.
+
+## 5.5 PLE encoding formula
+The paper’s encoding is piecewise linear over bins.
+
+Implementation logic for a single scalar `x`:
+- identify the active bin interval
+- produce a vector of bin activations
+- previous bins are 1
+- future bins are 0
+- active bin contains the linear interpolation
+
+Edge cases:
+- `x < b_0`
+- `x >= b_T`
+- exact boundary values
+
+The paper notes that these edge cases are covered by the formula and may produce values slightly outside the `[0,1]` interval at the extreme ends. The implementation should preserve the paper’s behavior rather than clipping unless necessary for numerical stability.
+
+## 5.6 PLE for Transformer vs MLP/ResNet
+The paper explicitly says:
+- for MLP-like models, PLE representations are concatenated directly
+- for Transformer-like models, an additional linear layer is needed after PLE
+
+Therefore, `PiecewiseLinearEmbedding` should support a mode that returns:
+- raw PLE vector
+- or PLE followed by a linear projection
+
+This is important because:
+- the Transformer is permutation-invariant over token order
+- the post-PL layer reintroduces feature identity
+
+## 5.7 Avoiding leakage and mismatch
+The class must separate:
+- fitting bins
+- encoding values
+- optional projection layer
+
+That ensures:
+- bins are derived only from training split
+- the same bins are used for validation/test
+- feature indices remain independent
+
+---
+
+## 6) `PeriodicEmbedding` logic
+
+This module adapts periodic activation functions to tabular numerical features.
+
+## 6.1 Paper-specific constraints
+The paper differs from original Fourier-feature style methods in two critical ways:
+
+1. features are embedded **independently**
+2. pre-activation coefficients are **trainable**, not fixed
+
+So the implementation should not mix features before the periodic transform.
+
+## 6.2 Tunable parameters
+From the paper and config:
+- `sigma` controls initialization scale
+- `k` controls periodic dimensionality / number of components
+
+From config:
+- `periodic_k: [1, 128]`
+
+The exact sigma search space is not listed in config, so the code should:
+- accept sigma from configuration if provided
+- otherwise use a clearly injected parameter from tuning logic
+- never hardcode an undocumented sigma range
+
+## 6.3 Initialization
+The paper states:
+- coefficients are initialized from `N(0, sigma)`
+
+So each feature should have its own coefficient tensor initialized with that distribution.
+
+## 6.4 Functional behavior
+For each scalar feature:
+- compute periodic features using trainable coefficients
+- maintain feature independence
+- output an embedding vector of dimension controlled by `k` or by the chosen implementation layout
+
+The module should be compatible with:
+- base periodic embeddings
+- periodic + linear
+- periodic + linear + ReLU
+
+## 6.5 Practical implementation constraint
+Because the exact equation is not fully visible in the provided paper text, the implementation should be designed so that:
+- the periodic transform is encapsulated cleanly
+- the coefficient initialization and `k` are configurable
+- the downstream wrapper can extend it with linear/ReLU layers without changing periodic logic
+
+This keeps the code faithful while leaving room to align with the exact source implementation if later verified.
+
+---
+
+## 7) `EmbeddingFactory` logic
+
+The factory must map model naming conventions to module construction.
+
+## 7.1 Naming patterns to support
+The paper uses the `Backbone-Embedding` naming convention.
+
+Examples:
+- `MLP`
+- `MLP-L`
+- `MLP-LR`
+- `MLP-LRLR`
+- `MLP-Q`
+- `MLP-Q-LR`
+- `MLP-Q-LRLR`
+- `MLP-T`
+- `MLP-T-LR`
+- `MLP-T-LRLR`
+- `MLP-P`
+- `MLP-PL`
+- `MLP-PLR`
+
+And similarly for ResNet / Transformer.
+
+## 7.2 Factory responsibilities
+The factory should:
+- parse the suffix
+- instantiate the appropriate embedding class
+- configure it based on backbone type
+- pass along tuned hyperparameters
+- ensure the correct output dimensions for the selected backbone
+
+## 7.3 Backbone-specific differences
+The factory should know:
+- MLP/ResNet usually consume concatenated feature embeddings
+- Transformer consumes token embeddings directly
+- PLE and periodic modules may need an extra linear projection in transformer mode
+
+This means the factory should not merely choose the embedding family; it should also set the correct post-processing mode.
+
+## 7.4 Config use
+The factory must pull values only from:
+- `config.models.*`
+- `config.hyperparameter_tuning.search_spaces.*`
+- `config.training.*`
+- `config.data.preprocessing.*`
+
+It should not invent default hyperparameters beyond what is necessary for tensor shape compatibility, and if a value is missing from config, it should be surfaced as an explicit requirement rather than silently chosen.
+
+---
+
+## 8) Shape and tensor contract
+
+This module and the downstream model wrappers must agree on tensor shapes.
+
+## 8.1 Input expectations
+The preprocessing module will likely provide:
+- `x_num`: tensor of shape `[batch_size, num_numeric_features]`
+- potentially `x_cat`: handled elsewhere
+
+This module should focus on `x_num`.
+
+## 8.2 Output expectations
+Depending on the embedding type and backbone, output should be either:
+
+- `[batch_size, num_features * emb_dim]` for concatenated tabular MLP/ResNet usage
+- `[batch_size, num_features, emb_dim]` for Transformer token usage
+
+The code should clearly separate these two cases to avoid silent shape bugs.
+
+## 8.3 Handling missing/categorical features
+This module should not embed categorical features. Those are handled elsewhere per the design.
+If categorical data are passed into this module, that would be an interface error.
+
+---
+
+## 9) Reproducibility requirements
+
+The paper uses:
+- 15 random seeds per tuned configuration
+- early stopping with patience 16
+- no learning rate schedule
+
+Although these are mostly training-level concerns, embedding modules can still affect reproducibility in two ways:
+
+### 9.1 Deterministic bin fitting
+Quantile binning and tree-based binning must be deterministic given the seed and training data.
+
+### 9.2 Deterministic parameter initialization
+PeriodicEmbedding and LinearEmbedding weights must be initialized in a seed-controlled way.
+
+The module itself should not call random generators outside the global seed context established by `utils/reproducibility.py`.
+
+---
+
+## 10) Compatibility with model variants
+
+This module must support all embedding families in the paper’s experiments.
+
+### 10.1 Linear family
+- `L`
+- `LR`
+- `LRLR`
+
+This means the output of `LinearEmbedding` should be composable with additional layers outside the module if needed, or the factory should build the composite embedding stack.
+
+### 10.2 PLE family
+- `Q`
+- `T`
+- and with `-L`, `-LR`, `-LRLR`
+
+The module should provide:
+- PLE encoding
+- optional linear projection
+- optional activation stack if the factory composes it internally
+
+### 10.3 Periodic family
+- `P`
+- `PL`
+- `PLR`
+
+The periodic module should be able to stand alone or be composed with post-layers.
+
+---
+
+## 11) Validation and safety checks
+
+To make the module robust, it should validate:
+
+1. **number of features**
+   - the fitted bin list matches input feature count
+
+2. **training-only fitting**
+   - PLE bin construction must not be used before fitting
+
+3. **finite boundaries**
+   - bin boundaries must be finite and sorted
+
+4. **non-empty bins**
+   - remove duplicate or zero-width bins, as the paper states for quantile PLE
+
+5. **shape consistency**
+   - output shape must match backbone expectations
+
+6. **task-independent behavior**
+   - embedding modules should not depend on classification/regression logic
+
+---
+
+## 12) Implementation order recommendation for this file
+
+To reduce risk, implement in this order:
+
+1. `BaseEmbedding`
+2. `LinearEmbedding`
+3. `PiecewiseLinearEmbedding` with quantile bins first
+4. target-aware PLE bins
+5. `PeriodicEmbedding`
+6. `EmbeddingFactory`
+7. optional helper methods for feature-wise encoding and shape conversion
+
+This order follows the paper’s conceptual structure and makes debugging easier.
+
+---
+
+## 13) Most important paper-faithful behaviors to preserve
+
+If only a few details are treated as non-negotiable, they are these:
+
+- embeddings are **feature-wise independent**
+- no feature-parameter sharing
+- quantile bins computed from **training data only**
+- target-aware bins built **per feature** using target information
+- PLE for transformer needs a **linear projection after PLE**
+- periodic embeddings use **trainable coefficients**
+- periodic initialization uses `N(0, sigma)`
+- `Linear` means **bias-free linear layer**
+- all hyperparameters must come from `config.yaml` or explicitly tuned search spaces
+
+---
+
+## 14) Final module-level conclusion
+
+`models/embeddings.py` should be treated as the methodological heart of the reproduction. Its role is not just to “embed numbers,” but to faithfully encode the paper’s main hypothesis: **how numerical values are represented can strongly affect tabular DL performance**.
+
+Therefore, the implementation must be:
+- modular
+- feature-wise independent
+- config-driven
+- compatible with multiple backbones
+- faithful to the paper’s binning and periodic-embedding logic
+
+If you want, I can next provide the same level of logic analysis for `models/backbones.py` or turn this into a precise implementation blueprint with class-by-class method responsibilities.

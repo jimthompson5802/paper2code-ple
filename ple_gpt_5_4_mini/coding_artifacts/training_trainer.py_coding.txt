@@ -1,0 +1,657 @@
+```python
+## training/trainer.py
+"""Training utilities for single-run tabular model optimization.
+
+This module implements the paper's training protocol for one tuned configuration:
+
+- AdamW optimization
+- Cross-entropy for classification and MSE for regression
+- Validation after every epoch
+- Early stopping with patience configured in ``config.yaml`` (default: 16)
+- Best-checkpoint restoration before test-time inference
+
+The trainer is intentionally lightweight and self-contained. It depends only on:
+
+- the composed model from ``models.tabular_model``
+- the preprocessed data container from ``data.preprocessing``
+- the shared configuration dictionary loaded from ``utils.io``
+
+Public API:
+  - Trainer.__init__(model, config)
+  - Trainer.train(data)
+  - Trainer.fit_one_epoch()
+  - Trainer.validate()
+  - Trainer.save_checkpoint(path)
+  - Trainer.load_best_checkpoint(path)
+
+The implementation is designed to be robust for the reproduction pipeline while
+remaining faithful to the experimental protocol described in the paper.
+"""
+
+from __future__ import annotations
+
+import copy
+import math
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
+
+import numpy as np
+import torch
+from torch import Tensor, nn
+from torch.optim import AdamW
+from torch.utils.data import DataLoader, TensorDataset
+from tqdm import tqdm
+
+from data.preprocessing import PreprocessedData
+from utils.reproducibility import get_device, set_seed
+
+
+@dataclass
+class TrainingHistory:
+    """Stores per-epoch training and validation statistics."""
+
+    train_loss: List[float]
+    val_loss: List[float]
+    val_score: List[float]
+    best_epoch: int
+    best_val_score: float
+    stopped_epoch: int
+
+
+class Trainer:
+    """Single-run training engine for one tabular model.
+
+    The trainer expects a fully constructed model and a preprocessed data
+    container. It does not perform tuning or preprocessing.
+
+    Args:
+      model: A ``torch.nn.Module`` implementing the composed tabular model.
+      config: Shared experiment configuration dictionary.
+    """
+
+    def __init__(self, model: nn.Module, config: Mapping[str, Any]) -> None:
+        """Initializes the trainer.
+
+        Args:
+          model: Model to train.
+          config: Experiment configuration mapping.
+
+        Raises:
+          TypeError: If inputs are not of the expected types.
+          KeyError: If required config keys are missing.
+        """
+        if not isinstance(model, nn.Module):
+            raise TypeError(f"Expected model to be nn.Module, got {type(model).__name__}.")
+        if not isinstance(config, Mapping):
+            raise TypeError(f"Expected config to be a mapping, got {type(config).__name__}.")
+
+        self.model: nn.Module = model
+        self.config: Dict[str, Any] = dict(config)
+
+        self.training_cfg: Dict[str, Any] = dict(self.config.get("training", {}))
+        self.eval_cfg: Dict[str, Any] = dict(self.config.get("evaluation", {}))
+        self.exp_cfg: Dict[str, Any] = dict(self.config.get("experiment", {}))
+
+        self.device: torch.device = get_device(self.config.get("device", "cpu"))
+        self.model.to(self.device)
+
+        self.task_type: str = self._resolve_task_type()
+        self.dataset_name: str = self._resolve_dataset_name()
+        self.batch_size: int = self._resolve_batch_size()
+
+        self.max_epochs: int = int(self.training_cfg.get("max_epochs", 100))
+        early_stopping_cfg: Dict[str, Any] = dict(self.training_cfg.get("early_stopping", {}))
+        self.patience: int = int(early_stopping_cfg.get("patience", 16))
+        self.min_delta: float = float(early_stopping_cfg.get("min_delta", 0.0))
+        self.lr_schedule: str = str(self.training_cfg.get("lr_schedule", "none")).lower()
+
+        self.optimizer_name: str = str(self.training_cfg.get("optimizer", "adamw")).lower()
+        self.loss_name_classification: str = str(
+            self.training_cfg.get("loss", {}).get("classification", "cross_entropy")
+        ).lower()
+        self.loss_name_regression: str = str(
+            self.training_cfg.get("loss", {}).get("regression", "mse")
+        ).lower()
+
+        self.learning_rate: float = self._resolve_learning_rate()
+        self.weight_decay: float = self._resolve_weight_decay()
+
+        self._criterion: nn.Module = self._build_criterion()
+        self._optimizer: torch.optim.Optimizer = self._build_optimizer()
+
+        self._current_epoch: int = 0
+        self._best_epoch: int = -1
+        self._best_val_score: float = math.inf if self._is_minimization_task() else -math.inf
+        self._best_val_loss: float = math.inf
+        self._best_state_dict: Optional[Dict[str, Tensor]] = None
+        self._last_checkpoint_path: Optional[Path] = None
+
+        self._train_loader: Optional[DataLoader] = None
+        self._val_loader: Optional[DataLoader] = None
+        self._test_loader: Optional[DataLoader] = None
+
+        self._train_dataset: Optional[TensorDataset] = None
+        self._val_dataset: Optional[TensorDataset] = None
+        self._test_dataset: Optional[TensorDataset] = None
+
+        self._history: TrainingHistory = TrainingHistory(
+            train_loss=[],
+            val_loss=[],
+            val_score=[],
+            best_epoch=-1,
+            best_val_score=self._best_val_score,
+            stopped_epoch=-1,
+        )
+
+    def train(self, data: PreprocessedData) -> Dict[str, Any]:
+        """Trains the model with early stopping and returns training artifacts.
+
+        The method:
+          1. builds dataloaders from the preprocessed data
+          2. trains for up to ``max_epochs``
+          3. evaluates on validation after each epoch
+          4. restores the best checkpoint
+          5. produces final test predictions
+
+        Args:
+          data: Preprocessed dataset splits.
+
+        Returns:
+          A dictionary containing:
+            - train_loss_history
+            - val_loss_history
+            - val_score_history
+            - best_epoch
+            - best_val_score
+            - test_predictions
+            - test_targets
+            - stopped_epoch
+        """
+        self._prepare_data(data)
+
+        best_epochs_without_improvement: int = 0
+        best_score: float = self._best_val_score
+
+        for epoch in range(self.max_epochs):
+            self._current_epoch = epoch
+            train_loss = self.fit_one_epoch()
+            val_loss, val_score = self.validate()
+
+            self._history.train_loss.append(float(train_loss))
+            self._history.val_loss.append(float(val_loss))
+            self._history.val_score.append(float(val_score))
+
+            improved = self._is_improvement(val_score, best_score)
+            if improved:
+                best_score = float(val_score)
+                self._best_val_score = float(val_score)
+                self._best_val_loss = float(val_loss)
+                self._best_epoch = epoch
+                best_epochs_without_improvement = 0
+                self._best_state_dict = copy.deepcopy(self.model.state_dict())
+            else:
+                best_epochs_without_improvement += 1
+
+            if best_epochs_without_improvement > self.patience:
+                self._history.stopped_epoch = epoch
+                break
+
+        if self._best_state_dict is not None:
+            self.model.load_state_dict(self._best_state_dict)
+
+        self._history.best_epoch = self._best_epoch
+        self._history.best_val_score = self._best_val_score
+        if self._history.stopped_epoch < 0:
+            self._history.stopped_epoch = self._current_epoch
+
+        test_predictions, test_targets = self.predict_split("test")
+        result: Dict[str, Any] = {
+            "train_loss_history": list(self._history.train_loss),
+            "val_loss_history": list(self._history.val_loss),
+            "val_score_history": list(self._history.val_score),
+            "best_epoch": int(self._history.best_epoch),
+            "best_val_score": float(self._history.best_val_score),
+            "stopped_epoch": int(self._history.stopped_epoch),
+            "test_predictions": test_predictions,
+            "test_targets": test_targets,
+        }
+        return result
+
+    def fit_one_epoch(self) -> float:
+        """Runs one optimization epoch over the training split.
+
+        Returns:
+          The mean training loss for the epoch.
+        """
+        if self._train_loader is None:
+            raise RuntimeError("Training data are not prepared. Call train() first.")
+
+        self.model.train()
+        total_loss: float = 0.0
+        total_examples: int = 0
+
+        for batch in self._train_loader:
+            x_num, x_cat, y = self._unpack_batch(batch)
+            x_num = x_num.to(self.device)
+            x_cat = x_cat.to(self.device)
+            y = y.to(self.device)
+
+            self._optimizer.zero_grad(set_to_none=True)
+            outputs = self.model(x_num, x_cat)
+            loss = self._compute_loss(outputs, y)
+            loss.backward()
+            self._optimizer.step()
+
+            batch_size = int(y.shape[0])
+            total_loss += float(loss.detach().item()) * batch_size
+            total_examples += batch_size
+
+        if total_examples == 0:
+            return 0.0
+        return total_loss / float(total_examples)
+
+    def validate(self) -> Tuple[float, float]:
+        """Evaluates the model on the validation split.
+
+        Returns:
+          A tuple ``(validation_loss, validation_score)`` where:
+            - validation_loss is the mean task loss
+            - validation_score is accuracy for classification or RMSE for regression
+        """
+        if self._val_loader is None:
+            raise RuntimeError("Validation data are not prepared. Call train() first.")
+
+        self.model.eval()
+
+        losses: List[float] = []
+        all_predictions: List[np.ndarray] = []
+        all_targets: List[np.ndarray] = []
+
+        with torch.no_grad():
+            for batch in self._val_loader:
+                x_num, x_cat, y = self._unpack_batch(batch)
+                x_num = x_num.to(self.device)
+                x_cat = x_cat.to(self.device)
+                y = y.to(self.device)
+
+                outputs = self.model(x_num, x_cat)
+                loss = self._compute_loss(outputs, y)
+                losses.append(float(loss.detach().item()))
+
+                preds = self._extract_predictions(outputs)
+                all_predictions.append(self._to_numpy(preds))
+                all_targets.append(self._to_numpy(y))
+
+        if not losses:
+            return 0.0, math.inf if self._is_minimization_task() else -math.inf
+
+        y_pred = np.concatenate(all_predictions, axis=0)
+        y_true = np.concatenate(all_targets, axis=0)
+        y_pred = self._sanitize_predictions(y_pred)
+        y_true = self._sanitize_targets(y_true)
+
+        validation_loss = float(np.mean(losses))
+        validation_score = self._compute_validation_score(y_true, y_pred)
+        return validation_loss, validation_score
+
+    def predict_split(self, split: str) -> Tuple[np.ndarray, np.ndarray]:
+        """Runs inference on one data split.
+
+        Args:
+          split: One of {'train', 'val', 'test'}.
+
+        Returns:
+          A tuple of ``(predictions, targets)`` as NumPy arrays.
+        """
+        loader = self._get_loader(split)
+        self.model.eval()
+
+        predictions: List[np.ndarray] = []
+        targets: List[np.ndarray] = []
+
+        with torch.no_grad():
+            for batch in loader:
+                x_num, x_cat, y = self._unpack_batch(batch)
+                x_num = x_num.to(self.device)
+                x_cat = x_cat.to(self.device)
+                y = y.to(self.device)
+
+                outputs = self.model(x_num, x_cat)
+                preds = self._extract_predictions(outputs)
+
+                predictions.append(self._to_numpy(preds))
+                targets.append(self._to_numpy(y))
+
+        if not predictions:
+            return np.empty((0,), dtype=np.float32), np.empty((0,), dtype=np.float32)
+
+        y_pred = np.concatenate(predictions, axis=0)
+        y_true = np.concatenate(targets, axis=0)
+        return self._sanitize_predictions(y_pred), self._sanitize_targets(y_true)
+
+    def save_checkpoint(self, path: Union[str, Path]) -> None:
+        """Saves the current training state to disk.
+
+        The checkpoint contains:
+          - model state dict
+          - optimizer state dict
+          - best validation score
+          - best epoch
+          - current epoch
+          - training history
+          - task metadata
+        """
+        checkpoint_path = Path(path).expanduser().resolve()
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+        checkpoint: Dict[str, Any] = {
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": self._optimizer.state_dict(),
+            "best_val_score": float(self._best_val_score),
+            "best_val_loss": float(self._best_val_loss),
+            "best_epoch": int(self._best_epoch),
+            "current_epoch": int(self._current_epoch),
+            "task_type": self.task_type,
+            "dataset_name": self.dataset_name,
+            "history": {
+                "train_loss": list(self._history.train_loss),
+                "val_loss": list(self._history.val_loss),
+                "val_score": list(self._history.val_score),
+                "best_epoch": int(self._history.best_epoch),
+                "best_val_score": float(self._history.best_val_score),
+                "stopped_epoch": int(self._history.stopped_epoch),
+            },
+        }
+        torch.save(checkpoint, checkpoint_path)
+        self._last_checkpoint_path = checkpoint_path
+
+    def load_best_checkpoint(self, path: Union[str, Path]) -> None:
+        """Loads model weights from a saved checkpoint.
+
+        Args:
+          path: Path to the checkpoint created by ``save_checkpoint``.
+        """
+        checkpoint_path = Path(path).expanduser().resolve()
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+
+        if "model_state_dict" not in checkpoint:
+            raise KeyError("Checkpoint does not contain 'model_state_dict'.")
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+
+        if "optimizer_state_dict" in checkpoint:
+            try:
+                self._optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            except Exception:
+                # Optimizer state is optional for restoration of inference weights.
+                pass
+
+        self._best_val_score = float(checkpoint.get("best_val_score", self._best_val_score))
+        self._best_val_loss = float(checkpoint.get("best_val_loss", self._best_val_loss))
+        self._best_epoch = int(checkpoint.get("best_epoch", self._best_epoch))
+        self._current_epoch = int(checkpoint.get("current_epoch", self._current_epoch))
+        self._last_checkpoint_path = checkpoint_path
+
+    def _prepare_data(self, data: PreprocessedData) -> None:
+        """Converts preprocessed arrays into deterministic dataloaders."""
+        if not isinstance(data, PreprocessedData):
+            raise TypeError(f"Expected PreprocessedData, got {type(data).__name__}.")
+
+        x_train_num = self._to_float_tensor(data.x_train_num)
+        x_val_num = self._to_float_tensor(data.x_val_num)
+        x_test_num = self._to_float_tensor(data.x_test_num)
+
+        x_train_cat = self._to_float_tensor(data.x_train_cat)
+        x_val_cat = self._to_float_tensor(data.x_val_cat)
+        x_test_cat = self._to_float_tensor(data.x_test_cat)
+
+        if self.task_type == "regression":
+            y_train = self._to_float_tensor(data.y_train).view(-1, 1)
+            y_val = self._to_float_tensor(data.y_val).view(-1, 1)
+            y_test = self._to_float_tensor(data.y_test).view(-1, 1)
+        else:
+            y_train = self._to_long_tensor(data.y_train).view(-1)
+            y_val = self._to_long_tensor(data.y_val).view(-1)
+            y_test = self._to_long_tensor(data.y_test).view(-1)
+
+        self._train_dataset = TensorDataset(x_train_num, x_train_cat, y_train)
+        self._val_dataset = TensorDataset(x_val_num, x_val_cat, y_val)
+        self._test_dataset = TensorDataset(x_test_num, x_test_cat, y_test)
+
+        self._train_loader = DataLoader(
+            self._train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            drop_last=False,
+            num_workers=0,
+            pin_memory=torch.cuda.is_available(),
+        )
+        self._val_loader = DataLoader(
+            self._val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=0,
+            pin_memory=torch.cuda.is_available(),
+        )
+        self._test_loader = DataLoader(
+            self._test_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=0,
+            pin_memory=torch.cuda.is_available(),
+        )
+
+    def _build_criterion(self) -> nn.Module:
+        """Constructs the task-appropriate loss function."""
+        if self.task_type == "regression":
+            if self.loss_name_regression != "mse":
+                raise ValueError(
+                    f"Unsupported regression loss '{self.loss_name_regression}'. Expected 'mse'."
+                )
+            return nn.MSELoss()
+
+        if self.loss_name_classification != "cross_entropy":
+            raise ValueError(
+                f"Unsupported classification loss '{self.loss_name_classification}'. "
+                "Expected 'cross_entropy'."
+            )
+        return nn.CrossEntropyLoss()
+
+    def _build_optimizer(self) -> torch.optim.Optimizer:
+        """Constructs the optimizer according to the config."""
+        if self.optimizer_name != "adamw":
+            raise ValueError(
+                f"Unsupported optimizer '{self.optimizer_name}'. Expected 'adamw'."
+            )
+        return AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
+
+    def _compute_loss(self, outputs: Tensor, targets: Tensor) -> Tensor:
+        """Computes the task-specific loss."""
+        if self.task_type == "regression":
+            preds = outputs.view(-1)
+            target_values = targets.view(-1).float()
+            return self._criterion(preds, target_values)
+
+        logits = outputs
+        if logits.ndim != 2:
+            raise ValueError(
+                f"Classification model outputs must be 2D logits, got shape {tuple(logits.shape)}."
+            )
+        return self._criterion(logits, targets.long())
+
+    def _extract_predictions(self, outputs: Tensor) -> Tensor:
+        """Converts model outputs to prediction values suitable for metrics."""
+        if self.task_type == "regression":
+            return outputs.view(-1)
+
+        if outputs.ndim == 1:
+            return outputs
+        if outputs.shape[1] == 1:
+            return outputs.view(-1)
+        return torch.argmax(outputs, dim=1)
+
+    def _compute_validation_score(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        """Computes the validation selection score."""
+        if self.task_type == "regression":
+            rmse = float(np.sqrt(np.mean((y_true.reshape(-1) - y_pred.reshape(-1)) ** 2)))
+            return rmse
+
+        if y_pred.ndim > 1:
+            y_pred = y_pred.reshape(-1)
+        y_true = y_true.reshape(-1)
+        accuracy = float(np.mean((y_true.astype(np.int64) == y_pred.astype(np.int64)).astype(np.float32)))
+        return accuracy
+
+    def _is_minimization_task(self) -> bool:
+        """Returns True if lower validation score is better."""
+        return self.task_type == "regression"
+
+    def _is_improvement(self, current_score: float, best_score: float) -> bool:
+        """Checks whether the current score improves over the best score."""
+        if self._is_minimization_task():
+            return (best_score - current_score) > self.min_delta
+        return (current_score - best_score) > self.min_delta
+
+    def _get_loader(self, split: str) -> DataLoader:
+        """Returns the dataloader for the requested split."""
+        split_name = str(split).lower()
+        if split_name == "train":
+            if self._train_loader is None:
+                raise RuntimeError("Training loader is not initialized.")
+            return self._train_loader
+        if split_name == "val":
+            if self._val_loader is None:
+                raise RuntimeError("Validation loader is not initialized.")
+            return self._val_loader
+        if split_name == "test":
+            if self._test_loader is None:
+                raise RuntimeError("Test loader is not initialized.")
+            return self._test_loader
+        raise ValueError(f"Unknown split '{split}'. Expected one of: train, val, test.")
+
+    def _unpack_batch(self, batch: Tuple[Tensor, Tensor, Tensor]) -> Tuple[Tensor, Tensor, Tensor]:
+        """Normalizes a batch produced by TensorDataset/DataLoader."""
+        if not isinstance(batch, (tuple, list)) or len(batch) != 3:
+            raise ValueError(
+                "Expected batches to be a tuple/list of (x_num, x_cat, y), "
+                f"got {type(batch).__name__} with length {len(batch) if hasattr(batch, '__len__') else 'NA'}."
+            )
+        x_num, x_cat, y = batch
+        return x_num, x_cat, y
+
+    def _to_float_tensor(self, array: Any) -> Tensor:
+        """Converts array-like input to a float tensor."""
+        tensor = torch.as_tensor(array, dtype=torch.float32)
+        if tensor.ndim == 1:
+            tensor = tensor.view(-1, 1)
+        return tensor
+
+    def _to_long_tensor(self, array: Any) -> Tensor:
+        """Converts array-like input to a long tensor."""
+        tensor = torch.as_tensor(array, dtype=torch.long)
+        if tensor.ndim == 2 and tensor.shape[1] == 1:
+            tensor = tensor.view(-1)
+        return tensor
+
+    def _to_numpy(self, tensor: Tensor) -> np.ndarray:
+        """Converts a tensor to a detached CPU NumPy array."""
+        return tensor.detach().cpu().numpy()
+
+    def _sanitize_predictions(self, preds: np.ndarray) -> np.ndarray:
+        """Ensures prediction arrays have a consistent shape and dtype."""
+        arr = np.asarray(preds)
+        if self.task_type == "regression":
+            return arr.reshape(-1).astype(np.float32, copy=False)
+        return arr.reshape(-1).astype(np.int64, copy=False)
+
+    def _sanitize_targets(self, targets: np.ndarray) -> np.ndarray:
+        """Ensures target arrays have a consistent shape and dtype."""
+        arr = np.asarray(targets)
+        if self.task_type == "regression":
+            return arr.reshape(-1).astype(np.float32, copy=False)
+        return arr.reshape(-1).astype(np.int64, copy=False)
+
+    def _resolve_task_type(self) -> str:
+        """Resolves the task type from configuration."""
+        task_type = self.config.get("task_type")
+        if task_type is not None:
+            return str(task_type).lower()
+
+        # Default fallback inferred from dataset name if available.
+        dataset_name = str(self.exp_cfg.get("dataset_name", self.config.get("dataset_name", ""))).lower()
+        regression_datasets = {"ca", "ho", "fb", "mi"}
+        if dataset_name in regression_datasets:
+            return "regression"
+        return "classification"
+
+    def _resolve_dataset_name(self) -> str:
+        """Resolves the dataset name from configuration."""
+        dataset_name = self.exp_cfg.get("dataset_name", self.config.get("dataset_name", None))
+        if dataset_name is None:
+            return "unknown"
+        return str(dataset_name).lower()
+
+    def _resolve_batch_size(self) -> int:
+        """Resolves the dataset-specific batch size from config."""
+        batch_cfg = dict(self.training_cfg.get("batch_size", {}))
+        dataset_key = self.dataset_name.lower()
+        batch_size = batch_cfg.get(dataset_key)
+        if batch_size is None:
+            # Safe default consistent with the paper's medium-sized tabular setups.
+            return 128
+        return int(batch_size)
+
+    def _resolve_learning_rate(self) -> float:
+        """Resolves learning rate from config or model-specific fields if present."""
+        for key in ("learning_rate", "lr"):
+            if key in self.config:
+                try:
+                    return float(self.config[key])
+                except (TypeError, ValueError):
+                    pass
+
+        model_cfg = dict(self.config.get("model", {}))
+        for key in ("learning_rate", "lr"):
+            if key in model_cfg:
+                try:
+                    return float(model_cfg[key])
+                except (TypeError, ValueError):
+                    pass
+
+        return 1e-3
+
+    def _resolve_weight_decay(self) -> float:
+        """Resolves weight decay from config or model-specific fields if present."""
+        for key in ("weight_decay", "wd"):
+            if key in self.config:
+                try:
+                    return float(self.config[key])
+                except (TypeError, ValueError):
+                    pass
+
+        model_cfg = dict(self.config.get("model", {}))
+        for key in ("weight_decay", "wd"):
+            if key in model_cfg:
+                try:
+                    return float(model_cfg[key])
+                except (TypeError, ValueError):
+                    pass
+
+        return 0.0
+
+    def get_history(self) -> Dict[str, Any]:
+        """Returns a copy of the current training history."""
+        return {
+            "train_loss": list(self._history.train_loss),
+            "val_loss": list(self._history.val_loss),
+            "val_score": list(self._history.val_score),
+            "best_epoch": int(self._history.best_epoch),
+            "best_val_score": float(self._history.best_val_score),
+            "stopped_epoch": int(self._history.stopped_epoch),
+        }
+```

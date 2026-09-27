@@ -1,0 +1,300 @@
+## Logic Analysis: `baselines/gbdt.py`
+
+### 1) Module responsibility
+This file implements the GBDT comparison baselines used in the paper:
+- **CatBoost**
+- **XGBoost**
+
+Its job is to:
+1. Train the baseline model on the same dataset splits used by deep models.
+2. Respect the paper’s preprocessing and target handling rules.
+3. Tune hyperparameters using the **same validation-driven protocol**.
+4. Return validation/test metrics in a format consistent with the rest of the system.
+5. Support dataset-specific behavior:
+   - **CatBoost** categorical-feature support
+   - **XGBoost** GPU tuning on **MI** and **CO**
+   - fixed early stopping / iteration settings from `config.yaml`
+
+This module should not introduce any new experimental logic beyond what is specified in the paper and config.
+
+---
+
+### 2) Required inputs and shared assumptions
+`GBDDBaselineRunner` must operate on the same split and preprocessing outputs as the deep models.
+
+It should assume:
+- The dataset has already been split into train / validation / test.
+- Preprocessing has already been applied consistently according to dataset rules.
+- Regression targets have been standardized if `config.data.target.regression_standardization = true`.
+- Categorical columns are available in a form that CatBoost can consume, while non-CatBoost paths use one-hot encoded inputs if that is how preprocessing is configured.
+
+Important alignment points from the config:
+- `notes.implementation_constraints`: same preprocessing for all deep models within a dataset
+- `otto_group_product_classification` has **no preprocessing**
+- `evaluation.test_runs_per_tuned_config = 15` applies to final reported tuned configurations
+- Baselines should still follow validation selection, early stopping, and tuning protocol
+
+---
+
+### 3) Public interface to implement
+Per the design, this module must provide:
+
+- `run_catboost()`
+- `run_xgboost()`
+
+No additional public methods should be assumed beyond the design.
+
+Both functions should:
+- accept preprocessed data and experiment configuration
+- perform tuning using the validation split
+- train the best model
+- evaluate on test
+- return metrics and best hyperparameters
+
+If the runner class is used as a wrapper, its API should still expose only these two public entry methods.
+
+---
+
+### 4) Data flow for CatBoost
+CatBoost is the simpler baseline because it can directly use categorical features.
+
+#### 4.1 Training data handling
+CatBoost should receive:
+- numerical features
+- categorical features in raw or integer-encoded form, depending on the preprocessing pipeline
+- labels for train/val/test
+
+For CatBoost:
+- **do not one-hot encode categorical features**
+- use CatBoost’s built-in categorical support
+- numeric preprocessing should follow the dataset-specific rule in `config.yaml`
+  - quantile transform by default
+  - no preprocessing for Otto
+
+#### 4.2 Objective and metric
+- Classification: optimize / evaluate **accuracy**
+- Regression: optimize / evaluate **RMSE**
+
+The paper uses validation performance for tuning and test performance for final reporting.
+
+#### 4.3 Hyperparameter space
+Use the appendix-configured CatBoost space from `config.yaml`:
+- `max_depth`: `[1, 10]`
+- `learning_rate`: `[0.001, 1.0]`
+- `bagging_temperature`: `[0.0, 1.0]`
+- `l2_leaf_reg`: `[1.0, 10.0]`
+- `leaf_estimation_iterations`: `[1, 10]`
+
+Fixed parameters from config:
+- `early_stopping_rounds = 50`
+- `od_pval = 0.001`
+- `iterations = 2000`
+
+These fixed parameters must not be tuned.
+
+#### 4.4 Categorical feature handling
+CatBoost requires categorical indices or column references.
+The module should ensure:
+- correct categorical feature indices are passed
+- no accidental transformation destroys categorical semantics
+- evaluation uses the same split features as training
+
+---
+
+### 5) Data flow for XGBoost
+XGBoost baseline follows the paper’s tuning protocol, but with special handling for MI and CO.
+
+#### 5.1 Feature handling
+XGBoost should use the same prepared feature matrix as the non-CatBoost baselines:
+- numeric features already transformed according to dataset policy
+- categorical features one-hot encoded if present in the preprocessing pipeline
+
+XGBoost does not use built-in categorical support here because the paper’s protocol specifies one-hot encoding for non-CatBoost algorithms.
+
+#### 5.2 Objective and metric
+- Classification: use the correct XGBoost classification objective
+- Regression: use regression objective
+- Optimize validation metric corresponding to task:
+  - accuracy
+  - RMSE
+
+Since the paper compares outcomes after validation-driven selection, the module should convert model predictions to class labels or continuous outputs as needed for metric computation.
+
+#### 5.3 Dataset-specific device policy
+From the paper and config:
+- For tuning on **MI** and **CO**, use `GPU`
+- In all other cases, use `CPU`
+- The config explicitly notes this policy
+
+This device logic must be applied only to tuning. The paper notes evaluation on those datasets also uses CPU in the visible excerpt, but the config text explicitly states:
+- tuning on MI and CO: `GPU`
+- all other cases, including evaluation on these two datasets: `CPU`
+
+This means the runner must separate:
+- tuning device choice
+- final fit/eval device choice
+
+If the implementation cannot support GPU reliably, it should still preserve the device-switching logic from config and fail clearly rather than silently changing behavior.
+
+#### 5.4 Hyperparameter space
+Use the XGBoost space from `config.yaml`:
+- `max_depth`: `[3, 10]`
+- `min_child_weight`: `[1e-4, 100.0]`
+- `subsample`: `[0.5, 1.0]`
+- `learning_rate`: `[0.001, 1.0]`
+- `colsample_bytree`: `[0.5, 1.0]`
+- `gamma`: `[0.0, 100.0]`
+- `lambda`: `[0.0, 10.0]`
+
+Fixed parameters from config:
+- `booster = gbtree`
+- `early_stopping_rounds = 50`
+- `n_estimators = 2000`
+
+These must remain fixed.
+
+---
+
+### 6) Tuning logic
+Both CatBoost and XGBoost should be tuned using the same general principle:
+1. Sample hyperparameters from the configured ranges.
+2. Train on training split.
+3. Evaluate on validation split.
+4. Select the best configuration according to validation score.
+
+Because the paper follows validation-based selection:
+- never use test data for tuning
+- use the validation score to determine the best trial
+
+The module should cooperate with `training/tuning.py` or implement its own internal tuning logic if that is how the design routes baseline experiments. The key requirement is that the validation-driven selection matches the paper.
+
+---
+
+### 7) Final test evaluation
+Once the best hyperparameters are selected:
+- retrain the model using the selected configuration
+- evaluate on the test split
+- report the final metric
+
+The paper’s baseline tables focus on final test performance. The baseline runner should therefore return:
+- best validation score
+- test score
+- tuned hyperparameters
+- optionally predictions if ensemble-level baseline processing is needed later
+
+---
+
+### 8) Metrics and output conventions
+The module should use the centralized metric conventions from `evaluation/metrics.py`:
+- `accuracy` for classification
+- `rmse` for regression
+
+For consistency, `GBDDBaselineRunner` should not invent its own metric semantics.
+
+Expected output should be compatible with the rest of the experiment pipeline, e.g. a dictionary containing:
+- dataset name
+- model name (`CatBoost` or `XGBoost`)
+- best validation metric
+- test metric
+- best hyperparameters
+- maybe seed info if the broader pipeline repeats runs
+
+---
+
+### 9) Seed and reproducibility behavior
+This module must rely on `utils/reproducibility.py` for deterministic control.
+
+Important:
+- use the same seed as the experiment config
+- if multiple trials or repeated runs are executed, seed each run consistently
+- do not introduce hidden randomness outside controlled seeds
+
+CatBoost and XGBoost both have internal randomness; those should be seeded through their respective APIs whenever possible.
+
+---
+
+### 10) Paper-specific constraints to preserve
+This module must respect the following paper constraints:
+
+1. **CatBoost uses categorical features directly**
+   - no one-hot encoding for CatBoost path
+
+2. **XGBoost uses one-hot encoded categorical variables**
+   - follows the non-CatBoost preprocessing policy
+
+3. **MI and CO use GPU for XGBoost tuning**
+   - as stated in the paper/config
+
+4. **Early stopping**
+   - `early_stopping_rounds = 50`
+
+5. **Iteration budget**
+   - `iterations = 2000` for CatBoost
+   - `n_estimators = 2000` for XGBoost
+
+6. **Target standardization**
+   - regression targets should already be standardized according to config
+   - the runner must not undo that
+
+7. **Same split protocol**
+   - train/val/test must remain consistent with the rest of the pipeline
+
+---
+
+### 11) Implementation dependencies
+This file will depend on:
+- `catboost`
+- `xgboost`
+- `numpy`
+- `pandas`
+- `sklearn.metrics`
+
+It should also import:
+- experiment config structure from the shared config utility
+- reproducibility helpers
+- the centralized metric evaluator if possible
+
+Avoid adding unrelated dependencies.
+
+---
+
+### 12) Edge cases and failure handling
+The runner should handle:
+- datasets without categorical features
+- regression vs classification objective switching
+- CPU/GPU availability differences
+- one-hot feature matrices with sparse/dense representations
+- empty or degenerate validation improvement cases during early stopping
+
+For Otto:
+- ensure the preprocessing rule “none” is respected before CatBoost/XGBoost consumption
+
+For MI:
+- ranking is treated as regression, so XGBoost/CatBoost should use regression loss/metric
+
+---
+
+### 13) Recommended internal structure
+Even though only `run_catboost()` and `run_xgboost()` are public by design, internally the module should logically separate:
+- parameter sampling
+- model construction
+- fit/evaluate
+- metric conversion
+- device selection
+
+This keeps the baseline reproduction faithful and testable.
+
+---
+
+### 14) Final reproducibility checklist for this file
+Before coding, confirm the following logic is implemented:
+
+- [ ] CatBoost uses native categorical support
+- [ ] XGBoost uses one-hot categorical features
+- [ ] Hyperparameter ranges match `config.yaml`
+- [ ] Fixed iteration / early stopping values match `config.yaml`
+- [ ] MI and CO XGBoost tuning uses GPU
+- [ ] All validation selection is done without test leakage
+- [ ] Output metrics use the shared evaluator
+- [ ] Seed handling is centralized and deterministic
+

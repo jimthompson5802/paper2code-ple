@@ -1,0 +1,294 @@
+----------------------------------------
+[Implementation approach]
+We will build a simple, modular PyTorch-based tabular learning system that reproduces the paper’s main experimental pipeline: dataset loading and preprocessing, feature-wise numerical embeddings (linear, PLE, periodic), backbone models (MLP, ResNet, FT-Transformer), Optuna-based hyperparameter tuning, early-stopping training with AdamW, and final test/ensemble evaluation. The system will rely on open-source libraries such as PyTorch, PyTorch Lightning or a lightweight custom training loop, scikit-learn for preprocessing and metrics, Optuna for Bayesian tuning, pandas/numpy for data handling, and CatBoost/XGBoost for GBDT baselines. The architecture will keep all embedding logic isolated in a small set of reusable modules so each backbone can be composed with any embedding type. Configuration will be YAML/JSON-driven to support reproducible runs across the 11 datasets and all model variants. The codebase will be organized so that one entrypoint can run end-to-end experiments, while specialized modules handle preprocessing, model construction, training, tuning, and evaluation.
+
+----------------------------------------
+[File list]
+- main.py
+- configs/default.yaml
+- data/dataset_loader.py
+- data/preprocessing.py
+- models/embeddings.py
+- models/backbones.py
+- models/tabular_model.py
+- training/trainer.py
+- training/tuning.py
+- evaluation/metrics.py
+- evaluation/ensemble.py
+- utils/reproducibility.py
+- utils/io.py
+- baselines/gbdt.py
+
+----------------------------------------
+[Data structures and interfaces]
+classDiagram
+    class ExperimentConfig {
+        +str dataset_name
+        +str model_name
+        +str task_type
+        +int seed
+        +int num_trials
+        +int patience
+        +str device
+        +dict dataset_params
+        +dict model_params
+        +dict train_params
+        +dict tuning_space
+    }
+
+    class DatasetSplits {
+        +pd.DataFrame train_df
+        +pd.DataFrame val_df
+        +pd.DataFrame test_df
+        +np.ndarray y_train
+        +np.ndarray y_val
+        +np.ndarray y_test
+        +list numerical_cols
+        +list categorical_cols
+    }
+
+    class PreprocessedData {
+        +torch.Tensor x_train_num
+        +torch.Tensor x_val_num
+        +torch.Tensor x_test_num
+        +torch.Tensor x_train_cat
+        +torch.Tensor x_val_cat
+        +torch.Tensor x_test_cat
+        +torch.Tensor y_train
+        +torch.Tensor y_val
+        +torch.Tensor y_test
+        +int num_features
+        +int cat_features
+        +dict feature_metadata
+    }
+
+    class DatasetLoader {
+        +__init__(config: ExperimentConfig)
+        +load_raw() pd.DataFrame
+        +split_data(df: pd.DataFrame) DatasetSplits
+        +load_and_split() DatasetSplits
+    }
+
+    class Preprocessor {
+        +__init__(config: ExperimentConfig)
+        +fit(splits: DatasetSplits) None
+        +transform(splits: DatasetSplits) PreprocessedData
+        +fit_transform(splits: DatasetSplits) PreprocessedData
+        +build_quantile_transformer() Any
+        +build_ohe_encoder() Any
+        +standardize_targets() None
+    }
+
+    class BaseEmbedding {
+        <<abstract>>
+        +output_dim: int
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class LinearEmbedding {
+        +__init__(num_features: int, emb_dim: int)
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class PiecewiseLinearEmbedding {
+        +__init__(bin_edges: list, emb_dim: int, mode: str)
+        +build_bins(x_train: np.ndarray) None
+        +encode_feature(x: torch.Tensor, feature_idx: int) torch.Tensor
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class PeriodicEmbedding {
+        +__init__(num_features: int, emb_dim: int, sigma: float, k: int)
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class EmbeddingFactory {
+        +create(model_name: str, config: ExperimentConfig) BaseEmbedding
+    }
+
+    class MLPBackbone {
+        +__init__(input_dim: int, hidden_dim: int, num_layers: int, dropout: float)
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class ResNetBackbone {
+        +__init__(input_dim: int, hidden_dim: int, num_layers: int, hidden_factor: float, dropout: float)
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class TransformerBackbone {
+        +__init__(num_tokens: int, emb_dim: int, n_layers: int, n_heads: int, ffn_factor: float, dropout: float)
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class TabularModel {
+        +__init__(embedding: BaseEmbedding, backbone: object, head: torch.nn.Module)
+        +forward(x_num: torch.Tensor, x_cat: torch.Tensor = None) torch.Tensor
+        +predict(x_num: torch.Tensor, x_cat: torch.Tensor = None) torch.Tensor
+    }
+
+    class ModelFactory {
+        +create(config: ExperimentConfig, data: PreprocessedData) TabularModel
+    }
+
+    class Trainer {
+        +__init__(model: TabularModel, config: ExperimentConfig)
+        +train(data: PreprocessedData) dict
+        +fit_one_epoch() float
+        +validate() float
+        +save_checkpoint(path: str) None
+        +load_best_checkpoint(path: str) None
+    }
+
+    class Tuner {
+        +__init__(config: ExperimentConfig)
+        +objective(trial: optuna.Trial) float
+        +run(data: PreprocessedData) dict
+        +sample_hyperparameters(trial: optuna.Trial) dict
+    }
+
+    class MetricsEvaluator {
+        +compute_classification(y_true: np.ndarray, y_pred: np.ndarray) dict
+        +compute_regression(y_true: np.ndarray, y_pred: np.ndarray) dict
+        +select_metric(task_type: str) str
+    }
+
+    class EnsembleEvaluator {
+        +__init__(num_groups: int)
+        +build_ensembles(predictions: list) list
+        +evaluate_ensembles(y_true: np.ndarray, ensembles: list) dict
+    }
+
+    class GBDDBaselineRunner {
+        +run_catboost(data: PreprocessedData, config: ExperimentConfig) dict
+        +run_xgboost(data: PreprocessedData, config: ExperimentConfig) dict
+    }
+
+    class ReproducibilityUtils {
+        +set_seed(seed: int) None
+        +set_deterministic() None
+        +get_device(device: str) torch.device
+    }
+
+    class IOUtils {
+        +load_config(path: str) ExperimentConfig
+        +save_json(obj: dict, path: str) None
+        +save_pickle(obj: object, path: str) None
+        +load_pickle(path: str) object
+    }
+
+    ExperimentConfig --> DatasetLoader
+    ExperimentConfig --> Preprocessor
+    ExperimentConfig --> Tuner
+    ExperimentConfig --> ModelFactory
+    DatasetLoader --> DatasetSplits
+    Preprocessor --> DatasetSplits
+    Preprocessor --> PreprocessedData
+    EmbeddingFactory --> BaseEmbedding
+    LinearEmbedding --|> BaseEmbedding
+    PiecewiseLinearEmbedding --|> BaseEmbedding
+    PeriodicEmbedding --|> BaseEmbedding
+    ModelFactory --> TabularModel
+    TabularModel --> BaseEmbedding
+    TabularModel --> MLPBackbone
+    TabularModel --> ResNetBackbone
+    TabularModel --> TransformerBackbone
+    Trainer --> TabularModel
+    Tuner --> Trainer
+    Tuner --> MetricsEvaluator
+    EnsembleEvaluator --> MetricsEvaluator
+    GBDDBaselineRunner --> PreprocessedData
+    IOUtils --> ExperimentConfig
+    ReproducibilityUtils --> Trainer
+
+----------------------------------------
+[Program call flow]
+sequenceDiagram
+    participant U as User
+    participant M as main.py
+    participant I as IOUtils
+    participant R as ReproducibilityUtils
+    participant DL as DatasetLoader
+    participant P as Preprocessor
+    participant T as Tuner
+    participant MF as ModelFactory
+    participant TR as Trainer
+    participant E as MetricsEvaluator
+    participant EN as EnsembleEvaluator
+    participant G as GBDDBaselineRunner
+
+    U->>M: run_experiment(config_path)
+    M->>I: load_config(config_path)
+    I-->>M: ExperimentConfig
+    M->>R: set_seed(config.seed)
+    R-->>M: deterministic environment ready
+    M->>DL: __init__(config)
+    M->>DL: load_and_split()
+    DL->>DL: load_raw()
+    DL->>DL: split_data(raw_df)
+    DL-->>M: DatasetSplits
+    M->>P: __init__(config)
+    M->>P: fit_transform(splits)
+    P->>P: fit(splits)
+    P->>P: transform(splits)
+    P-->>M: PreprocessedData
+
+    alt hyperparameter tuning enabled
+        M->>T: __init__(config)
+        M->>T: run(data)
+        loop for each Optuna trial
+            T->>T: sample_hyperparameters(trial)
+            T->>MF: create(config_with_trial_params, data)
+            MF-->>T: TabularModel
+            T->>TR: __init__(model, config_with_trial_params)
+            T->>TR: train(data)
+            TR->>TR: fit_one_epoch()
+            TR->>TR: validate()
+            TR-->>T: best validation score
+        end
+        T-->>M: best hyperparameters
+    end
+
+    M->>MF: create(best_config, data)
+    MF-->>M: TabularModel
+    M->>TR: __init__(model, best_config)
+    M->>TR: train(data)
+    loop epochs until early stopping
+        TR->>TR: fit_one_epoch()
+        TR->>TR: validate()
+        TR->>TR: save_checkpoint(best_model)
+    end
+    TR-->>M: trained model + best checkpoint
+
+    M->>E: compute_classification()/compute_regression()
+    E-->>M: test metrics
+
+    opt repeated 15 seeds
+        M->>R: set_seed(next_seed)
+        M->>TR: train(data)
+        TR-->>M: run complete
+        M->>E: evaluate on test
+        E-->>M: per-seed metrics
+    end
+
+    opt ensemble evaluation
+        M->>EN: __init__(num_groups=3)
+        M->>EN: build_ensembles(predictions)
+        EN-->>M: 3 ensembles
+        M->>EN: evaluate_ensembles(y_true, ensembles)
+        EN-->>M: ensemble metrics
+    end
+
+    opt GBDT baselines
+        M->>G: run_catboost(data, config)
+        G-->>M: CatBoost metrics
+        M->>G: run_xgboost(data, config)
+        G-->>M: XGBoost metrics
+    end
+
+    M-->>U: save tables, metrics, checkpoints
+
+----------------------------------------
+[Anything UNCLEAR]
+The exact periodic-embedding equation and the precise search space for sigma are not fully visible in the parsed paper text, so those should be confirmed from the supplementary material or source repository if available. The exact dataset split script used by the authors is also not fully specified here, so reproducing the splits may require referencing the accompanying benchmark code from Gorishniy et al. Finally, the paper’s mention of 'iterations = 100' in tuning tables should be verified to determine whether it means training epochs, optimization steps, or another stopping budget.
+

@@ -1,0 +1,327 @@
+# Logic Analysis: `data/dataset_loader.py`
+
+This module is responsible for **loading raw benchmark datasets**, **identifying feature types**, and **producing the exact train/validation/test split objects** used by the rest of the pipeline. It must be designed to support the paper’s 11-tabular-benchmark setup and remain fully config-driven.
+
+## 1) Role in the reproduction pipeline
+
+`DatasetLoader` is the first data-specific component in the experiment flow:
+
+1. Read `ExperimentConfig`
+2. Load dataset from local storage or configured source
+3. Map columns into:
+   - numerical features
+   - categorical features
+   - target column
+4. Reproduce the paper’s split protocol:
+   - train
+   - validation
+   - test
+5. Return a structured object that downstream preprocessing and training can consume
+
+This module must not perform preprocessing itself; it only loads and splits raw data.
+
+---
+
+## 2) Inputs and outputs
+
+### Inputs
+The loader should use only configuration values and dataset metadata, especially:
+
+- `config.dataset_name`
+- `config.dataset_params` if present
+- `config.seed` from `experiment.seed`
+- dataset-specific batch or split-related settings if encoded in config
+- file/path information from config or agreed conventions
+
+### Outputs
+`load_and_split()` should return a `DatasetSplits`-like structure as defined in the design, containing:
+
+- `train_df`, `val_df`, `test_df`
+- `y_train`, `y_val`, `y_test`
+- `numerical_cols`
+- `categorical_cols`
+
+The returned data must preserve row alignment between feature tables and target arrays.
+
+---
+
+## 3) Datasets that must be supported
+
+The paper uses 11 datasets:
+
+- Gesture Phase Prediction (`GE`)
+- Churn Modelling (`CH`)
+- California Housing (`CA`)
+- House 16H (`HO`)
+- Adult (`AD`)
+- Otto Group Product Classification (`OT`)
+- Higgs Small (`HI`)
+- Facebook Comments Volume (`FB`)
+- Santander Customer Transaction Prediction (`SA`)
+- Covertype (`CO`)
+- Microsoft MSLR-WEB10K fold 1 (`MI`)
+
+The loader must support all 11 via one unified interface.
+
+---
+
+## 4) Dataset-specific loading logic
+
+### 4.1 General pattern
+For most datasets, `load_raw()` should:
+
+- locate the dataset in a known directory or via a configured path
+- read into a `pandas.DataFrame`
+- identify target column
+- preserve original row order unless the splitting logic requires shuffling
+
+The module should not invent URLs or download procedures beyond what is configured or conventionally expected from the benchmark codebase.
+
+### 4.2 Microsoft MSLR-WEB10K
+This dataset is special:
+
+- The paper explicitly says it uses **Fold 1**
+- Loading should be fold-aware
+- The loader must support a file layout or dataset parameter that identifies the fold
+- Since the paper treats it as a regression task, target handling should preserve numeric labels
+
+The loader should not assume it can download or reconstruct this dataset automatically unless a path is explicitly configured.
+
+### 4.3 Otto Group Product Classification
+This dataset is special in preprocessing, but for loading:
+
+- it has categorical labels/classes
+- the loader must detect that it is a multiclass classification task
+- the loader must expose numeric and categorical columns correctly
+- the split protocol must still be consistent with the paper’s benchmark split strategy
+
+### 4.4 Datasets with mixed feature types
+Several datasets contain both numerical and categorical features:
+
+- `CH`
+- `AD`
+- `OT`
+- potentially others depending on raw source representation
+
+The loader must infer or map these correctly based on dataset metadata or explicit configuration, not by guessing later in preprocessing.
+
+---
+
+## 5) Split protocol requirements
+
+The paper states that datasets are split into:
+
+- train
+- validation
+- test
+
+and that validation is used for:
+
+- hyperparameter tuning
+- early stopping
+
+test is used only for final evaluation.
+
+### 5.1 Reproducibility requirement
+The split logic must be deterministic given `config.seed` and dataset name.
+
+### 5.2 Split source
+The paper says it mostly follows Gorishniy et al. and mentions a split script in the supplementary material. Since the exact script is not provided here, the loader should:
+
+- support a configurable split ratio or split specification if present in config
+- support loading predefined split indices if the dataset files already contain them
+- otherwise perform a deterministic split using `sklearn.model_selection`
+
+### 5.3 Recommended behavior
+The module should prioritize the following order:
+
+1. Use predefined official split indices if available
+2. Use explicit split settings from config if provided
+3. Fall back to deterministic split generation using `config.seed`
+
+This preserves reproducibility while remaining practical.
+
+---
+
+## 6) Feature-type identification
+
+The loader must produce `numerical_cols` and `categorical_cols`.
+
+### 6.1 Preferred method
+If dataset metadata is known, feature types should be assigned from a dataset registry.
+
+### 6.2 Fallback method
+If metadata is incomplete, infer from dtypes:
+
+- numeric dtypes → numerical
+- object/category/string → categorical
+
+But this fallback should be used carefully because some tabular datasets may encode categorical values as integers. For those, dataset-specific metadata is safer.
+
+### 6.3 Important constraint
+The downstream preprocessing module expects these lists to be correct and stable. The loader must not reorder columns arbitrarily.
+
+---
+
+## 7) Internal structure recommendation
+
+Although code is not being written yet, the logic should be organized around a dataset registry inside `DatasetLoader`.
+
+### Suggested registry contents
+For each dataset name:
+
+- file name / directory pattern
+- target column name
+- task type:
+  - binary classification
+  - multiclass classification
+  - regression
+- numerical columns
+- categorical columns
+- optional fold specification
+- optional split source / ratio
+
+This registry can be implemented as internal metadata, but it must remain consistent with the config and paper.
+
+---
+
+## 8) `load_raw()` logic
+
+`load_raw()` should:
+
+1. Resolve dataset name from config
+2. Resolve data path from config or conventional location
+3. Read dataset into a DataFrame
+4. Normalize column names if needed
+5. Attach or preserve target column
+6. Return the raw DataFrame ready for splitting
+
+### Notes
+- It should not alter values except for minimal parsing
+- It should not preprocess missing values globally unless a dataset requires a parsing step
+- It should avoid any random operations
+
+---
+
+## 9) `split_data(df)` logic
+
+`split_data(df)` should:
+
+1. Determine feature/target column identities
+2. Extract `X` and `y`
+3. Use dataset-specific split strategy
+4. Return train/val/test partitions
+
+### 9.1 Deterministic split
+If using `sklearn.model_selection`, the split should be deterministic by seeding with `config.seed`.
+
+### 9.2 Validation split
+The paper uses validation for tuning and early stopping, so the loader should produce a separate validation partition, not cross-validation folds, unless the dataset’s official protocol demands otherwise.
+
+### 9.3 Class balance / stratification
+For classification datasets, the split should be stratified if the benchmark protocol or the loaded split script supports it. If not explicitly available, this should be documented as a fallback decision in implementation notes.
+
+### 9.4 Regression
+For regression datasets:
+- use ordinary deterministic split
+- do not stratify
+- keep target values unchanged here; standardization happens later in preprocessing
+
+---
+
+## 10) `load_and_split()` logic
+
+This should be the main convenience entrypoint.
+
+### Sequence
+1. Call `load_raw()`
+2. Call `split_data(df)`
+3. Return the split object with:
+   - dataframes
+   - target arrays
+   - feature type lists
+
+This method should be the one used by `main.py`.
+
+---
+
+## 11) Config dependencies from `config.yaml`
+
+The loader must reference configuration values explicitly available in `config.yaml`:
+
+- `experiment.seed`
+- `data.preprocessing.numerical.default`
+- `data.preprocessing.numerical.otto_group_product_classification`
+- `data.preprocessing.categorical.default`
+- `training.batch_size.*` only if the loader needs dataset identification metadata, but not for loading itself
+- `notes.implementation_constraints` for the rule that Otto must not receive feature preprocessing later
+
+The loader should **not** invent split ratios or paths unless they are supplied elsewhere in config or inferred from a controlled local dataset layout.
+
+---
+
+## 12) Error handling requirements
+
+The loader should fail clearly if:
+
+- dataset name is unknown
+- required file is missing
+- target column is absent
+- numerical/categorical schema cannot be determined
+- fold-based data is requested but the fold file is missing
+
+Useful errors should mention the dataset name and expected file/pattern.
+
+---
+
+## 13) Reproducibility considerations
+
+Because the paper reports averages over multiple seeds and tuned hyperparameters, this loader must be fully deterministic for a given seed. That means:
+
+- any random split must use the configured seed
+- no hidden shuffling unless intentional
+- if split indices are saved, they should be reused exactly
+
+This is especially important for fair comparisons across embedding methods.
+
+---
+
+## 14) Interface expectations from the design
+
+This module must conform to the existing design and should only expose the methods already listed:
+
+- `__init__(config)`
+- `load_raw()`
+- `split_data(df)`
+- `load_and_split()`
+
+Do not add public methods beyond this interface.
+
+---
+
+## 15) Implementation priority within this file
+
+The logic should be implemented in this order:
+
+1. Dataset registry / metadata mapping
+2. Raw file resolution
+3. Column type detection
+4. Deterministic split generation
+5. Fold-aware support for Microsoft
+6. Final `load_and_split()` wrapper
+
+This ensures the rest of the pipeline can rely on a stable dataset object from the start.
+
+---
+
+## 16) Summary of key requirements
+
+- Support all 11 datasets from the paper
+- Keep splitting deterministic and config-driven
+- Preserve exact train/val/test separation
+- Identify numerical and categorical columns correctly
+- Handle Microsoft MSLR-WEB10K fold loading
+- Avoid preprocessing here; only load and split
+- Use only the interfaces defined in the design
+- Reference `config.yaml` values directly and do not invent hidden settings
+

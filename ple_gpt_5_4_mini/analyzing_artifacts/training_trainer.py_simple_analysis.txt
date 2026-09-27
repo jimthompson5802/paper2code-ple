@@ -1,0 +1,379 @@
+## Logic Analysis: `training/trainer.py`
+
+This module implements the full single-run training lifecycle for one tuned tabular model, following the paper’s protocol and the fixed configuration in `config.yaml`.
+
+---
+
+### 1) Purpose and scope
+
+`Trainer` is responsible for:
+
+- training one `TabularModel` instance on one dataset split
+- using **AdamW**
+- selecting the correct loss by task type
+- validating after every epoch
+- applying **early stopping with patience = 16**
+- saving and restoring the **best validation checkpoint**
+- producing final **test-set inference** after training
+
+It does **not**:
+- tune hyperparameters
+- load or preprocess raw data
+- create model architectures
+- perform ensemble aggregation
+- compute final metrics beyond collecting predictions / losses needed by `evaluation/metrics.py`
+
+Those responsibilities belong to other modules in the design.
+
+---
+
+### 2) Configuration constraints to obey
+
+All training logic must reference `config.yaml` and not invent values.
+
+Relevant fixed settings:
+
+- `training.optimizer = adamw`
+- `training.loss.classification = cross_entropy`
+- `training.loss.regression = mse`
+- `training.early_stopping.patience = 16`
+- `training.early_stopping.min_delta = 0.0`
+- `training.lr_schedule = none`
+- `training.max_epochs = 100`
+- `evaluation.test_runs_per_tuned_config = 15`
+
+Dataset-specific batch sizes must come from:
+
+- `training.batch_size.<dataset>`
+
+Learning rate and weight decay are model-family dependent and are produced by tuning/model configuration, not by this trainer itself.
+
+---
+
+### 3) Required inputs and expected data contract
+
+The trainer must operate on the preprocessed data structure from `data/preprocessing.py`:
+
+- numerical tensors
+- categorical tensors if present
+- targets for train / val / test
+- metadata sufficient to infer task behavior
+
+The trainer should assume the preprocessing stage has already handled:
+
+- quantile transform / no preprocessing for Otto
+- one-hot encoding for categorical features for non-CatBoost models
+- target standardization for regression
+
+Therefore, the trainer should **not** alter data preprocessing.
+
+---
+
+### 4) Model interface assumptions
+
+The trainer will consume the `TabularModel` interface from `models/tabular_model.py`.
+
+It should rely only on the interface defined in the design:
+
+- forward pass accepts numerical and optional categorical tensors
+- outputs logits for classification and predictions for regression
+
+The trainer must not assume any extra public methods beyond those in the design.  
+Training should only rely on calling the model directly through `forward(...)`.
+
+---
+
+### 5) Loss selection logic
+
+The trainer must choose loss strictly by `task_type`:
+
+#### Classification
+Use:
+- `torch.nn.CrossEntropyLoss`
+
+Expected output:
+- model outputs raw logits of shape `[batch_size, num_classes]`
+- targets are class indices of shape `[batch_size]`
+
+#### Regression
+Use:
+- `torch.nn.MSELoss`
+
+Expected output:
+- model outputs scalar predictions of shape `[batch_size]` or `[batch_size, 1]`
+- targets are float tensors with matching shape
+
+#### Microsoft ranking dataset
+The paper says Microsoft is treated as regression.  
+So the trainer should still use the regression branch for `task_type="regression"`.
+
+---
+
+### 6) Optimizer logic
+
+The only optimizer to use is:
+
+- `torch.optim.AdamW`
+
+This must match the paper and config.
+
+Optimizer parameters:
+
+- model parameters
+- learning rate from the tuned model config
+- weight decay from the tuned model config
+
+No learning-rate scheduler is used, because:
+
+- `training.lr_schedule = none`
+
+So the trainer must not instantiate or step any scheduler.
+
+---
+
+### 7) Batch size handling
+
+Batch size is dataset-specific and must be read from:
+
+- `training.batch_size`
+
+The trainer should not hardcode batch sizes.
+
+It should assume batches are already assembled through a dataloader or batch iterator coming from the surrounding pipeline, or internally create one if that is part of the implementation plan. Either way, the dataset key must map to the configured batch size.
+
+The paper’s protocol uses the same batch size per dataset for all deep models.
+
+---
+
+### 8) Training loop behavior
+
+The `train()` method should implement:
+
+1. initialize optimizer and loss
+2. move model and tensors to device
+3. run epochs up to `training.max_epochs = 100`
+4. each epoch:
+   - call `fit_one_epoch()`
+   - call `validate()`
+   - compare validation score to current best
+   - save checkpoint if improved
+   - update early stopping counter if not improved
+5. stop when patience is exceeded
+6. restore the best checkpoint
+7. evaluate on the test set
+
+This matches the paper’s use of validation-based early stopping and final test reporting.
+
+---
+
+### 9) Validation and early stopping criteria
+
+The paper states:
+
+- stop after `patience + 1` consecutive epochs without validation improvement
+- patience is fixed to `16`
+
+Config additionally gives:
+
+- `min_delta = 0.0`
+
+Therefore:
+
+- a validation improvement is any strictly better score by more than `0.0`
+- the score to monitor is the validation metric appropriate for the task
+
+The trainer should use the **validation objective direction** consistent with the metric:
+
+- Accuracy: higher is better
+- RMSE: lower is better
+
+Because `validate()` is part of training and not final metrics reporting, it should return a scalar that the trainer can compare consistently.
+
+Recommended internal logic:
+- for classification: maximize validation accuracy or equivalent validation score
+- for regression: minimize validation RMSE
+
+The trainer should not infer alternative metrics not present in config.
+
+---
+
+### 10) `fit_one_epoch()` logic
+
+This method should handle one full pass over the training data.
+
+Responsibilities:
+
+- set model to train mode
+- iterate over training batches
+- move batch tensors to the selected device
+- forward pass
+- compute task-appropriate loss
+- backward pass
+- optimizer step
+- accumulate training loss statistics
+
+It should return at least a summary loss value, possibly averaged over batches.
+
+Important:
+- do not evaluate on validation/test inside this method
+- do not perform checkpointing here
+- do not modify seeds here
+
+---
+
+### 11) `validate()` logic
+
+This method should:
+
+- switch the model to eval mode
+- disable gradient computation
+- run over the validation split
+- collect predictions and targets
+- compute validation loss and/or validation metric
+
+Its output must be compatible with early stopping.
+
+For classification:
+- likely compute average cross-entropy or accuracy
+- but whichever scalar is used for model selection must be consistent
+
+For regression:
+- likely compute RMSE on the validation split
+
+The paper uses validation for tuning and early stopping, so this function should be deterministic for a given seed and fixed model state.
+
+---
+
+### 12) `save_checkpoint()` and `load_best_checkpoint()`
+
+These are part of the required public API and must work as follows:
+
+#### `save_checkpoint(path)`
+Save the best model state and enough metadata to recover training state if needed.
+
+At minimum, checkpoint should include:
+- model state dict
+- optimizer state dict if needed for resuming
+- best validation score
+- current epoch
+- any task-specific metadata necessary for restoration
+
+#### `load_best_checkpoint(path)`
+Restore the best saved weights into the current model.
+
+This should be used after training is complete, before test inference.
+
+Because the paper’s final evaluation uses the best validation configuration, not the last epoch, checkpoint restoration is mandatory.
+
+---
+
+### 13) Final test inference
+
+After the best checkpoint is restored, the trainer should produce predictions on the test split.
+
+Important:
+- test data must not influence training or checkpoint selection
+- test evaluation happens once per trained seed after early stopping selects the best model
+- final metric computation itself belongs to `evaluation/metrics.py`, but trainer should provide the predictions needed
+
+For the 15-seed protocol:
+- the outer orchestration in `main.py` will call the trainer multiple times with different seeds
+- trainer should remain single-run and seed-agnostic beyond receiving the seed from config
+
+---
+
+### 14) Reproducibility requirements
+
+The trainer depends on `utils/reproducibility.py`, so it must assume:
+
+- random seed is already set before training begins
+- deterministic behavior has been requested if applicable
+- device selection is already resolved
+
+The trainer itself should avoid introducing extra nondeterminism:
+- keep dataloader shuffling controlled by the seed
+- avoid stochastic operations outside model-defined dropout behavior
+- do not use random sampling inside training logic
+
+---
+
+### 15) Data flow inside the trainer
+
+The typical flow is:
+
+1. receive model and preprocessed data
+2. build loss and optimizer from config
+3. loop over epochs:
+   - train one epoch
+   - validate
+   - compare against best
+   - checkpoint if improved
+4. restore best weights
+5. run test inference
+6. return training history / predictions / best score
+
+This aligns with the paper’s “validation for tuning, test for final evaluation” protocol.
+
+---
+
+### 16) Output artifacts expected from Trainer
+
+The trainer should support returning or storing:
+
+- best validation score
+- epoch of best validation
+- final test predictions
+- history of train/validation loss or metric per epoch
+- checkpoint path used
+
+These are useful for:
+- Optuna tuning in `training/tuning.py`
+- final result aggregation in `main.py`
+- ensemble construction in `evaluation/ensemble.py`
+
+---
+
+### 17) Edge cases to handle
+
+The trainer must be robust to:
+
+- regression targets with shape issues after standardization
+- classification target dtype requirements for cross-entropy
+- binary classification being treated as classification, not regression
+- test split existing but not used until after training
+- datasets with categorical features already one-hot encoded by preprocessing
+- no validation improvement for the full patience window
+- best checkpoint occurring at epoch 0 or early in training
+
+---
+
+### 18) Non-goals for this file
+
+Do not implement here:
+
+- dataset downloading
+- preprocessing transforms
+- Optuna search space sampling
+- ensemble averaging
+- CatBoost/XGBoost training
+- metric table formatting
+- model architecture details beyond invoking the supplied model
+
+Those are separate modules by design.
+
+---
+
+### 19) Summary of the implementation contract
+
+`training/trainer.py` must provide a single-run, config-driven training engine that:
+
+- uses `AdamW`
+- uses cross-entropy for classification and MSE for regression
+- trains for up to 100 epochs
+- validates every epoch
+- early-stops with patience 16
+- saves/restores the best validation model
+- returns final test inference outputs for downstream evaluation
+- respects the paper’s no-scheduler, seed-controlled, reproducible protocol
+
+This module is central to reproducing the paper because all tuned models, repeated seeds, and final comparisons depend on it.

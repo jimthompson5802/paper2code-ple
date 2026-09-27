@@ -1,0 +1,199 @@
+## Logic Analysis: `utils/reproducibility.py`
+
+### Purpose
+This module must provide the foundational reproducibility controls used by every other part of the experiment pipeline. It is the first module to implement because:
+
+- all dataset splitting must be deterministic,
+- all hyperparameter tuning trials must be reproducible,
+- all model initialization and training runs must be seeded consistently,
+- all evaluation results must be comparable across the 15 runs required by the paper,
+- device selection must be centralized and explicit.
+
+Per the design, this module exposes exactly these public functions:
+
+- `set_seed(seed)`
+- `set_deterministic()`
+- `get_device(device)`
+
+No other public API should be assumed.
+
+---
+
+### Paper-driven requirements
+From the paper and `config.yaml`, the reproducibility policy is:
+
+- A single global experiment seed is defined in `config.experiment.seed = 42`.
+- Each tuned configuration must be evaluated over `config.experiment.num_seeds = 15` random seeds.
+- Training must use early stopping with `patience = 16` and no LR schedule.
+- All training/tuning/evaluation must be deterministic as far as PyTorch allows.
+- Reproducibility must cover:
+  - Python `random`
+  - NumPy
+  - PyTorch CPU
+  - PyTorch CUDA, if available
+
+The module should not invent any additional randomness policy or seed schedule; it only establishes the deterministic base and will be called by higher-level code that varies seeds across the 15 runs.
+
+---
+
+### Responsibilities of each function
+
+#### 1) `set_seed(seed)`
+This function must seed all relevant RNGs using the provided integer seed.
+
+Required behavior:
+- seed Python’s `random`
+- seed NumPy’s RNG
+- seed PyTorch CPU RNG
+- seed PyTorch CUDA RNGs if CUDA is available
+- optionally set environment variable `PYTHONHASHSEED` for hash-based determinism
+
+Important implementation constraints:
+- Use only the seed passed in by the caller.
+- Do not derive new seeds internally.
+- Do not hardcode seed values.
+- Do not assume a seed sequence beyond what higher-level orchestration provides.
+
+Why this matters for the paper:
+- The paper reports averages over 15 random seeds.
+- Each of those runs must be independently reproducible once its seed is known.
+- Optuna trials, model initializations, and minibatch shuffling must all respond to this seed.
+
+---
+
+#### 2) `set_deterministic()`
+This function should enforce deterministic behavior in PyTorch as much as possible.
+
+Required behavior:
+- enable deterministic algorithms in PyTorch where supported
+- disable CuDNN benchmarking
+- enable CuDNN deterministic mode
+- if needed, set environment variables that promote deterministic CUDA behavior
+
+This function should be called once at startup, before model creation or data loading, so that:
+- convolution and reduction kernels are deterministic where possible,
+- GPU-related nondeterminism is minimized,
+- repeated runs are stable.
+
+Important constraints:
+- Do not add training logic here.
+- Do not couple this function to any dataset or model behavior.
+- It is a global execution policy, not a trainer utility.
+
+Potential practical note:
+- Some deterministic settings may raise warnings or errors for unsupported operations. The module should prefer strict determinism, consistent with reproduction goals.
+
+---
+
+#### 3) `get_device(device)`
+This function should convert a configuration string into a concrete PyTorch device.
+
+Expected behavior:
+- if `device` requests CUDA and CUDA is available, return a CUDA device
+- otherwise return CPU
+- if the caller passes a specific CUDA index, honor it when possible
+- if the requested device is unavailable, fall back safely to CPU
+
+This function must not:
+- silently change model logic,
+- allocate tensors,
+- make policy decisions beyond device resolution.
+
+Why this matters:
+- The same experiment code should run on CPU or GPU depending on config and availability.
+- Baseline GBDT and deep models may be executed on different hardware, but the device resolution for PyTorch models must be centralized.
+
+---
+
+### Interaction with `config.yaml`
+This module should be driven indirectly by configuration, not by hardcoded assumptions.
+
+Relevant config values:
+- `experiment.seed`: used by `set_seed`
+- `notes.implementation_constraints`: require deterministic reproduction
+- training, tuning, and evaluation modules will call these utilities, but this module should not read the config file itself unless the surrounding architecture explicitly passes values in
+
+Do **not** hardcode:
+- `42`
+- number of seeds
+- patience
+- batch sizes
+- any dataset-specific choice
+
+These belong to other modules and to the config-driven orchestration.
+
+---
+
+### Determinism considerations
+To support the paper’s 15-seed protocol, the module should account for the following:
+
+1. **Python hash determinism**
+   - Setting `PYTHONHASHSEED` helps keep dictionary/set iteration more stable across runs.
+
+2. **NumPy randomness**
+   - Needed for preprocessing, split generation, and some tuning/sample procedures.
+
+3. **PyTorch CPU and CUDA**
+   - Model initialization
+   - DataLoader shuffling
+   - dropout masks
+   - optimizer behavior
+
+4. **GPU nondeterminism**
+   - Some PyTorch operations may still be nondeterministic depending on backend support.
+   - The module should do its best via deterministic flags, but higher-level code must avoid nondeterministic operations when possible.
+
+---
+
+### Expected call flow
+This module is used at the very start of experiment execution:
+
+1. `main.py` loads config.
+2. `main.py` calls `set_seed(config.experiment.seed)`.
+3. `main.py` calls `set_deterministic()`.
+4. `main.py` resolves the execution device via `get_device(config.device)` or the relevant config field.
+5. All subsequent modules inherit this deterministic context.
+
+For repeated seed runs:
+- higher-level code should call `set_seed(run_seed)` before each independent training/evaluation run.
+- `set_deterministic()` can be called once globally at startup.
+
+---
+
+### Edge cases and expected handling
+
+#### Invalid seed input
+- The function should expect an integer-like seed.
+- If the caller passes a non-integer, the safest behavior is to let the error surface clearly rather than silently coercing unexpected values.
+
+#### CUDA unavailable
+- `get_device("cuda")` should gracefully fall back to CPU if CUDA is not available.
+- `set_seed` should still seed CPU RNGs normally.
+
+#### Deterministic algorithm support
+- Some PyTorch versions may warn if deterministic algorithms are not fully supported.
+- The implementation should prioritize reproducibility over permissive execution.
+
+---
+
+### Testing implications
+This module is small but critical, so it should be validated with simple checks:
+
+- repeated calls to `set_seed(42)` produce the same:
+  - NumPy random numbers
+  - Python random numbers
+  - PyTorch random tensors
+- `get_device("cpu")` returns CPU
+- `get_device("cuda")` returns CUDA only when available, otherwise CPU
+- `set_deterministic()` does not crash on the target environment
+
+---
+
+### Implementation scope summary
+`utils/reproducibility.py` should be a minimal, reliable foundation with no experiment-specific logic beyond deterministic execution and device resolution. It must support all later modules, especially:
+
+- dataset split reproducibility
+- Optuna tuning reproducibility
+- repeated seed training
+- fair evaluation and ensemble averaging
+

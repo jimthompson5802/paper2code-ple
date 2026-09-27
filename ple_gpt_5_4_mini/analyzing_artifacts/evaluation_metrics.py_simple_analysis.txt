@@ -1,0 +1,288 @@
+### Logic Analysis: `evaluation/metrics.py`
+
+This module is responsible for all metric computations used during:
+
+- validation-based hyperparameter tuning
+- final test evaluation across 15 seeds
+- ensemble evaluation
+- summary reporting across seeds
+
+It must stay strictly aligned with the paper and `config.yaml`.
+
+---
+
+## 1) Purpose and scope
+
+`MetricsEvaluator` should provide a single, consistent metric interface for all experiments so that:
+
+- **classification** datasets are evaluated with **accuracy**
+- **regression** datasets are evaluated with **RMSE**
+- the **Microsoft MSLR-WEB10K** task is treated as regression, as stated in the paper
+- seed-level results can be aggregated into mean / standard deviation summaries
+
+This module should not contain any model logic, preprocessing logic, or dataset loading logic. It only evaluates predictions against labels.
+
+---
+
+## 2) Configuration-driven behavior
+
+Use only the evaluation-related settings explicitly present in `config.yaml`:
+
+- `evaluation.metrics.classification = accuracy`
+- `evaluation.metrics.regression = rmse`
+- `evaluation.validation_selection = best_validation_score`
+- `evaluation.test_runs_per_tuned_config = 15`
+
+The paper and config imply:
+
+- validation metric is the same metric used for selecting the best model
+- for classification, “best” means higher accuracy
+- for regression, “best” means lower RMSE
+- the evaluation module should expose a clear rule for whether higher or lower is better
+
+Do not invent additional metrics or thresholds.
+
+---
+
+## 3) Required public interface
+
+Per design, this file must define `MetricsEvaluator` with these methods:
+
+### `compute_classification(y_true, y_pred) -> dict`
+Computes classification metric(s).
+
+Expected behavior:
+
+- use **accuracy**
+- accept predicted labels or class logits/probabilities depending on how the trainer calls it
+- if probabilities/logits are passed, the caller should already convert them to class labels where appropriate, unless the implementation explicitly supports conversion
+- return a dictionary so that future extension is possible, but the required primary output should be accuracy
+
+Recommended output structure:
+- `{"accuracy": float}`
+
+### `compute_regression(y_true, y_pred) -> dict`
+Computes regression metric(s).
+
+Expected behavior:
+
+- use **RMSE**
+- support both scalar regression targets and Microsoft’s ranking-as-regression setting
+- return a dictionary with the primary metric
+
+Recommended output structure:
+- `{"rmse": float}`
+
+### `select_metric(task_type) -> str`
+Returns the metric name that should be used for model selection.
+
+Expected mapping:
+- classification → `accuracy`
+- regression → `rmse`
+
+This is important because training/tuning code should not have to branch on metric names in multiple places.
+
+---
+
+## 4) Metric definitions
+
+### 4.1 Classification: Accuracy
+
+For classification datasets:
+
+- metric = fraction of exact matches between predicted labels and ground truth labels
+- use `sklearn.metrics.accuracy_score`
+
+This aligns with the paper’s tables for datasets such as GE, CH, AD, OT, HI, FB, SA.
+
+Important implementation detail:
+
+- the metric should be computed on the **final predicted class labels**
+- if model outputs logits/probabilities, conversion to labels should happen consistently in the caller or via a small helper if the interface supports it
+
+### 4.2 Regression: RMSE
+
+For regression datasets:
+
+- metric = root mean squared error
+- use `sklearn.metrics.mean_squared_error(..., squared=False)` or equivalent
+- return the positive root value
+
+This applies to:
+- CA
+- HO
+- MI
+
+### 4.3 Microsoft ranking-as-regression
+
+The paper explicitly says Microsoft is treated as regression using the pointwise approach.
+
+Therefore:
+
+- no ranking metric should be introduced here
+- compute RMSE exactly like other regression datasets
+- ensure the caller does not attempt to interpret it as a ranking metric
+
+---
+
+## 5) Summary statistics over seeds
+
+The paper reports results over **15 random seeds** per tuned configuration, and often uses mean and standard deviation.
+
+This module should therefore support summarizing a list of per-seed metric values.
+
+Even though the design only explicitly requires `compute_classification`, `compute_regression`, and `select_metric`, the logic should include a clean internal convention for seed summaries, because the training pipeline and final tables require it.
+
+Expected summary behavior:
+
+- input: list/array of scalar metric values across seeds
+- output: mean and standard deviation
+- for classification: mean accuracy and std
+- for regression: mean RMSE and std
+
+Recommended summary form:
+- `{"mean": float, "std": float}`
+
+Be careful that:
+- for accuracy, higher is better
+- for RMSE, lower is better
+- summary statistics should not flip the sign or convert RMSE to negative values unless the training loop explicitly requires a maximization objective
+
+---
+
+## 6) Model selection logic compatibility
+
+The paper and config use `best_validation_score`, but the metric direction differs by task:
+
+- classification: maximize accuracy
+- regression: minimize RMSE
+
+`MetricsEvaluator` should therefore support a consistent interpretation of “best” by exposing the metric name, while the trainer/tuner handles the direction correctly.
+
+Suggested logic:
+- `select_metric("classification") -> "accuracy"`
+- `select_metric("regression") -> "rmse"`
+
+Then the trainer/tuner should know:
+- accuracy is better when larger
+- rmse is better when smaller
+
+This module should not hardcode tuning logic, but it should clearly return the correct metric label.
+
+---
+
+## 7) Input expectations
+
+### `y_true`
+- NumPy array-like
+- shape `[n_samples]`
+- classification labels or regression targets
+- should be comparable directly with predictions
+
+### `y_pred`
+- for classification: label predictions, or possibly probability/logit outputs if the higher-level pipeline passes them in
+- for regression: float predictions
+- shape `[n_samples]`
+
+The module should assume predictions have already been formatted appropriately by the caller whenever possible to keep responsibilities clean.
+
+---
+
+## 8) Edge cases and robustness
+
+The evaluator should be resilient to common issues:
+
+### Classification
+- If predictions are one-hot vectors or probabilities, either:
+  - the caller converts them to labels, or
+  - the evaluator provides a clear, deterministic conversion rule (`argmax`)
+- Ensure labels and predictions are flattened before scoring
+
+### Regression
+- Ensure both arrays are cast to floating point
+- Flatten to 1D before RMSE computation
+
+### Empty inputs
+- Should not occur in normal training/evaluation
+- If encountered, raise a clear error rather than silently returning invalid metrics
+
+### NaNs / infs
+- These should be treated as upstream errors
+- The evaluator should not try to impute or sanitize them silently
+
+---
+
+## 9) Per-seed reporting behavior
+
+The evaluation pipeline will likely call this module once per seed and then aggregate externally.
+
+So this module should focus on:
+- per-run metric computation
+- optional helper for aggregating multiple runs
+
+Do not mix:
+- tuning-time validation metric computation
+- test-time metric computation
+- ensemble metric computation
+
+They should all use the same metric definitions, but remain separable in the control flow.
+
+---
+
+## 10) Compatibility with ensemble evaluation
+
+The ensemble evaluator will average predictions across models and then call this module.
+
+Therefore this module must remain agnostic to whether predictions come from:
+- one model
+- an ensemble of 5 models
+- averaged predictions across 3 ensembles
+
+For classification ensembles:
+- final predictions should be label predictions after averaging probabilities or logits as handled upstream
+
+For regression ensembles:
+- final predictions are averaged numeric outputs
+
+Then:
+- classification → accuracy
+- regression → RMSE
+
+---
+
+## 11) Recommended internal helper logic
+
+Even though only three public methods are required, the module may benefit from internal helpers such as:
+
+- `_prepare_arrays(y_true, y_pred)`
+- `_to_class_labels(y_pred)`
+- `_rmse(y_true, y_pred)`
+
+These should stay private/internal and not expand the public API beyond the design.
+
+---
+
+## 12) Alignment with paper and config
+
+This module must enforce the following paper/config constraints:
+
+- Use **accuracy** for all classification datasets
+- Use **RMSE** for all regression datasets
+- Treat **Microsoft** as regression
+- Compute metrics consistently across:
+  - tuning
+  - 15-seed final evaluation
+  - ensemble evaluation
+- Do not introduce additional metrics, averaging schemes, or task-specific exceptions
+
+---
+
+## 13) Final implementation intent
+
+`evaluation/metrics.py` should become the single canonical metric source for the entire reproduction pipeline. Its job is simple but critical:
+
+1. map task type to the right metric
+2. compute that metric correctly
+3. provide seed-level summary statistics in a consistent format
+
+This ensures that the tuning, training, and reporting stages all evaluate models in the same way, which is essential for faithful reproduction of the paper’s experiments.

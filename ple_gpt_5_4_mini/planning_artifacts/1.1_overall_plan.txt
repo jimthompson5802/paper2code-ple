@@ -1,0 +1,662 @@
+Below is a practical reproduction plan for **“On Embeddings for Numerical Features in Tabular Deep Learning”** focused on faithfully rebuilding the paper’s methodology and experimental protocol from scratch.
+
+---
+
+# 1) Reproduction goal
+
+The paper studies how **numerical-feature embeddings** affect tabular deep learning models, especially:
+
+- **MLP**
+- **ResNet**
+- **Transformer / FT-Transformer**
+- Compared against **CatBoost** and **XGBoost**
+
+The core claim is that better numerical embeddings can substantially improve tabular DL performance, and in some cases close the gap to GBDT.
+
+Your reproduction should therefore implement:
+
+1. The **embedding modules** described in Section 3:
+   - Simple linear embedding
+   - **Piecewise Linear Encoding (PLE)**
+   - **Periodic activations**
+   - Baselines such as AutoDis / DICE if desired for completeness
+2. The **same backbone families**:
+   - MLP
+   - ResNet
+   - Transformer-L (FT-Transformer)
+3. The **same evaluation protocol**:
+   - Dataset-specific preprocessing
+   - Hyperparameter tuning on validation
+   - 15 random seeds for each tuned configuration
+   - Mean test performance reported
+   - Ensemble evaluation for some comparisons
+4. The same **dataset set**:
+   - 11 public tabular datasets
+
+---
+
+# 2) Methodology to reproduce
+
+## 2.1 General framework for numerical embeddings
+
+The paper defines a per-feature embedding function:
+
+- For each numerical feature \(x_i\), compute
+  \[
+  z_i = f_i(x_i) \in \mathbb{R}^{d_i}
+  \]
+- Important constraints:
+  - Each feature is embedded **independently**
+  - The same functional form is used across all features
+  - Parameters are **not shared** between features
+- Output usage:
+  - For **MLP-like** backbones: concatenate all feature embeddings into one flat vector
+  - For **Transformer-like** backbones: feed embeddings as token-like feature vectors directly
+
+This is crucial: do **not** mix numerical features inside the embedding function itself, except where the backbone later mixes them.
+
+---
+
+## 2.2 Piecewise Linear Encoding (PLE)
+
+This is one of the paper’s main contributions.
+
+### Core idea
+For each numerical feature, split its range into bins and encode a scalar value as a piecewise-linear vector over bins.
+
+### Encoding behavior
+For a feature value \(x\) and bins \(B_1,\dots,B_T\), the encoding is a vector of length \(T\). Each component is:
+
+- 0 before the active interval
+- 1 after the active interval
+- linearly interpolated inside the active bin
+
+This makes the representation:
+- continuous
+- ordered
+- more expressive than scalar input
+- still relatively interpretable
+
+### Important implementation note
+For **Transformer-based models**, PLE alone is not enough because Transformers are permutation-invariant over token order. The paper solves this by placing a **linear layer after PLE** so each feature’s bins are mapped to a trainable embedding space.
+
+Formally:
+- PLE(x) → Linear → final embedding
+
+This is equivalent to having trainable vectors for bins and aggregating them with PLE weights.
+
+---
+
+## 2.3 Bin construction for PLE
+
+The paper uses two binning strategies:
+
+### A. Quantile-based bins
+- Bins are formed using empirical quantiles of each feature on the **training split**
+- Use the training set only to compute quantiles
+- Remove empty bins if any
+
+This is the unsupervised version: **PLE-q**
+
+### B. Target-aware bins
+- Bins are built using labels
+- The method is analogous to **C4.5 discretization**
+- Practically, for each feature, build a greedy 1D decision tree on the training data using the target
+- Leaves define bins
+- Also set:
+  - \(b_0 = \min(x)\)
+  - \(b_T = \max(x)\)
+
+This is the supervised version: **PLE-t**
+
+### Hyperparameters to tune
+For target-aware PLE:
+- maximum number of leaves
+- minimum number of items per leaf
+- minimum information gain required for a split
+
+For quantile PLE:
+- number of quantiles
+
+---
+
+## 2.4 Periodic activation embeddings
+
+The paper also adapts periodic features for tabular data.
+
+### Key design choice
+Unlike some coordinate-based periodic approaches, the paper insists that each feature be embedded **separately before mixing**.
+
+### Trainable form
+- Uses trainable pre-activation coefficients
+- Initialize coefficients from \( \mathcal{N}(0, \sigma) \)
+- Tune:
+  - \(\sigma\)
+  - \(k\) (number of periodic components / embedding size factor, as described in the paper)
+
+The exact mathematical equation is not fully visible in the provided parse, but the implementation should follow the repository/paper formula as closely as possible:
+- periodic transform per feature
+- trainable coefficient initialization
+- feature-wise independent embedding
+
+This module is named **Periodic** in the experiments.
+
+---
+
+## 2.5 Simple differentiable layers on top of embeddings
+
+The paper tests whether standard layers improve embeddings:
+
+- Linear
+- ReLU
+- LeakyReLU
+- stacked combinations like:
+  - Linear
+  - Linear + ReLU
+  - Linear + ReLU + Linear
+  - etc.
+
+Important naming convention from the paper:
+- **L** = linear layer
+- **LR** = linear layer + ReLU
+- **LRLR** = linear + ReLU + linear + ReLU
+- **P** = periodic base module
+- **PL** = periodic + linear
+- **PLR** = periodic + linear + ReLU
+- **PLE q / PLE t** similarly combined with linear/relu
+
+For Transformer models, the paper often uses a linear layer after PLE to restore a token embedding dimension.
+
+---
+
+# 3) Datasets and data handling
+
+## 3.1 Datasets used
+
+The paper uses 11 datasets:
+
+1. Gesture Phase Prediction (GE)
+2. Churn Modelling (CH)
+3. California Housing (CA)
+4. House 16H (HO)
+5. Adult (AD)
+6. Otto Group Product Classification (OT)
+7. Higgs Small (HI)
+8. Facebook Comments Volume (FB)
+9. Santander Customer Transaction Prediction (SA)
+10. Covertype (CO)
+11. Microsoft MSLR-WEB10K fold 1 (MI)
+
+From the paper’s table, these include a mix of:
+- binary classification
+- multiclass classification
+- regression
+- ranking treated as regression for Microsoft
+
+### Dataset-specific properties
+The paper includes numbers of:
+- train / validation / test samples
+- numerical features
+- categorical features
+- task type
+- batch size
+
+You should reconstruct these exactly from Appendix C / Table 8 if possible.
+
+---
+
+## 3.2 Preprocessing protocol
+
+The paper is explicit:
+
+### For deep models
+- Use the **same preprocessing for all deep models** on a given dataset
+- For all datasets **except Otto Group Product Classification**, apply **quantile transformation** from scikit-learn
+- For Otto, **do not apply feature preprocessing**
+- Regression targets are standardized for all algorithms
+
+### For categorical features
+- For CatBoost: use built-in categorical feature support
+- For all other algorithms: one-hot encode categorical variables
+
+This is important for fidelity.
+
+### What to implement
+Build a preprocessing pipeline that can switch by dataset:
+- Quantile transform on numerical features
+- No preprocessing for Otto
+- One-hot encode categorical features for non-CatBoost methods
+- Target standardization for regression
+
+---
+
+## 3.3 Splits
+
+The dataset is split into:
+
+- train
+- validation
+- test
+
+The paper says it follows Gorishniy et al. for split construction and that the split script is provided in supplementary material.
+
+You should:
+- Recreate the same split logic if available from the referenced paper/code
+- Otherwise, use a deterministic train/val/test split protocol and document the limitation
+
+Critical point:
+- validation set is used for **hyperparameter tuning and early stopping**
+- test set is used **only once after tuning**
+
+---
+
+# 4) Backbones to implement
+
+The paper uses three main backbones.
+
+## 4.1 MLP
+Standard feed-forward network on concatenated feature embeddings.
+
+Tune:
+- number of layers
+- layer size
+- dropout
+- learning rate
+- weight decay
+
+From the appendix:
+- # layers: UniformInt[1, 16]
+- layer size: UniformInt[1, 1024]
+- dropout: {0, Uniform[0, 0.5]}
+- learning rate: LogUniform[5e-5, 0.005]
+- weight decay: {0, LogUniform[1e-6, 1e-3]}
+- # iterations: 100
+
+## 4.2 ResNet
+Tabular ResNet as in Gorishniy et al.
+
+Tune:
+- # layers: UniformInt[1, 8]
+- layer size: UniformInt[32, 512]
+- hidden factor: Uniform[1, 4]
+- hidden dropout: Uniform[0, 0.5]
+- residual dropout: {0, Uniform[0, 0.5]}
+- learning rate: LogUniform[5e-5, 0.005]
+- weight decay: {0, LogUniform[1e-6, 1e-3]}
+- # iterations: 100
+
+## 4.3 Transformer-L
+This is FT-Transformer from Gorishniy et al.
+
+Tune:
+- # layers
+- embedding size
+- residual dropout
+- attention dropout
+- FFN dropout
+- FFN factor
+- learning rate
+- weight decay
+
+The paper provides dataset-dependent search spaces:
+- For datasets {SA, CO, MI}:
+  - # layers: UniformInt[2, 4]
+  - embedding size: UniformInt[192, 512]
+  - residual dropout: Const(0.0)
+  - attention dropout: Uniform[0, 0.5]
+  - FFN dropout: Uniform[0, 0.5]
+  - FFN factor: Uniform[2/3, 8/3]
+  - learning rate: LogUniform[1e-5, 3e-4]
+  - weight decay: Const(1e-5)
+- For the rest:
+  - # layers: UniformInt[1, 4]
+  - embedding size: UniformInt[96, 512]
+  - residual dropout: {0, Uniform[0, 0.2]}
+  - attention dropout: Uniform[0, 0.5]
+  - FFN dropout: Uniform[0, 0.5]
+  - FFN factor: Uniform[2/3, 8/3]
+  - learning rate: LogUniform[1e-5, 1e-3]
+  - weight decay: LogUniform[1e-6, 1e-4]
+
+---
+
+# 5) Model variants to reproduce
+
+The paper uses a naming scheme of:
+
+**Backbone-Embedding**
+
+You should implement these families:
+
+## 5.1 Simple embedding baselines
+- MLP
+- MLP-L
+- MLP-LR
+- MLP-LRLR
+- MLP-AutoDis
+- MLP-DICE
+
+Likewise for ResNet and Transformer-L where applicable.
+
+## 5.2 PLE-based
+- MLP-Q
+- MLP-Q-LR
+- MLP-Q-LRLR
+- MLP-T
+- MLP-T-LR
+- MLP-T-LRLR
+
+Similarly:
+- ResNet-Q, ResNet-Q-LR, ResNet-Q-LRLR
+- ResNet-T, ResNet-T-LR, ResNet-T-LRLR
+- Transformer-Q-L, Transformer-Q-LR
+- Transformer-T-L, Transformer-T-LR
+
+## 5.3 Periodic-based
+- MLP-P
+- MLP-PL
+- MLP-PLR
+- ResNet-P
+- ResNet-PLR
+- Transformer-PLR
+
+The paper often reports that:
+- PLE + linear/relu often improves performance
+- Periodic + differentiable layers tends to outperform raw periodic alone
+
+---
+
+# 6) Training and optimization protocol
+
+## 6.1 Optimizer
+Use:
+- **AdamW**
+
+## 6.2 Loss
+- Classification: cross-entropy
+- Regression: mean squared error
+
+## 6.3 Learning rate schedules
+- **No learning rate schedules**
+
+## 6.4 Early stopping
+Train until:
+- `patience + 1` consecutive epochs without validation improvement
+- `patience = 16`
+
+## 6.5 Epoch budget
+The appendix lists `# iterations = 100` for many hyperparameter searches, likely meaning a maximum of 100 training epochs/iterations in tuning runs. The exact interpretation should match the original codebase as closely as possible.
+
+## 6.6 Seeds and repetition
+For each tuned configuration:
+- run **15 experiments with different random seeds**
+- report average test performance
+
+This is required.
+
+---
+
+# 7) Hyperparameter tuning strategy
+
+## 7.1 Tuning method
+The paper uses:
+- **Optuna**
+- TPE sampler / Bayesian optimization
+
+## 7.2 Validation selection
+- Tune on validation score only
+- Never use test set during tuning
+
+## 7.3 Search spaces to implement
+
+### Linear embedding output size
+- UniformInt[1, 128]
+
+### PLE quantile bins
+- UniformInt[2, 256]
+
+### PLE target-aware bins
+- max leaves: UniformInt[2, 256]
+- min samples per leaf: UniformInt[1, 128]
+- min information gain: LogUniform[1e-9, 0.01]
+
+### Periodic module
+- \(k\): UniformInt[1, 128]
+- \(\sigma\): tuned, but the exact search space is not explicitly visible in the parse
+  - You should inspect supplementary material or repository if available
+  - This is a point of ambiguity to note in your reproduction log
+
+---
+
+# 8) Evaluation protocol
+
+## 8.1 Metrics
+Use the metric appropriate for each dataset:
+- **Accuracy** for classification
+- **RMSE** for regression
+
+For ranking dataset Microsoft:
+- treat as regression, per the paper
+
+## 8.2 Reporting
+For each tuned model:
+- run 15 seeds
+- report mean test performance
+- also compute standard deviations
+
+## 8.3 Ensemble evaluation
+For each model-dataset pair:
+- split the 15 trained models into **3 disjoint groups of 5**
+- average predictions within each group
+- report ensemble performance
+
+This is used in the broader DL vs GBDT comparison.
+
+## 8.4 Rank aggregation
+The paper reports average rank across datasets. If you want to match the tables:
+- rank models within each dataset
+- better metric value ranks higher for accuracy
+- lower ranks higher for RMSE
+- average ranks across datasets
+
+---
+
+# 9) Specific experiments to reproduce
+
+## 9.1 Simple differentiable embedding modules
+Reproduce Table 3:
+- Compare MLP with:
+  - L
+  - LR
+  - LRLR
+  - AutoDis
+  - DICE
+- Use all 11 datasets
+- Report mean over 15 seeds
+
+## 9.2 PLE experiments
+Reproduce Table 4:
+- Compare PLE-q and PLE-t with:
+  - base
+  - +L
+  - +LR
+  - +LRLR
+- Apply to MLP and Transformer-L
+
+## 9.3 Periodic experiments
+Reproduce Table 5:
+- Compare Periodic-based modules:
+  - P
+  - PL
+  - PLR
+  - PLRLR
+- Apply to MLP and Transformer-L
+
+## 9.4 DL vs GBDT comparison
+Reproduce Table 6:
+- Compare:
+  - CatBoost
+  - XGBoost
+  - baseline DL models
+  - best embedding-enhanced DL models
+- Report average ranks
+- Consider ensembles, not just single models
+
+## 9.5 Model size comparison
+Reproduce parameter-count analysis:
+- Compare how embeddings change model parameter count
+- Especially MLP-LR, MLP-T, MLP-T-LR, MLP-PLR
+- Report total parameter counts per dataset
+
+## 9.6 Alternative binning schemes
+Reproduce Section 5.2:
+- Compare PLE to:
+  - thermometer encoding
+  - one-blob encoding
+- Use same tuning/evaluation protocol
+
+## 9.7 PLE as preprocessing
+Reproduce Section 5.3:
+- Re-evaluate tuned models under different preprocessing settings
+- Show that PLE reduces sensitivity to preprocessing choice
+
+## 9.8 Periodic for XGBoost
+Reproduce Section 5.4:
+- Apply fixed-random periodic features to XGBoost
+- Keep original features too
+- Expect no benefit
+
+---
+
+# 10) Implementation roadmap
+
+## Step 1: Reconstruct data loaders
+Build dataset-specific loaders that can:
+- fetch or read raw data
+- identify categorical vs numerical columns
+- apply split logic
+- apply preprocessing
+- return train/val/test tensors
+
+## Step 2: Implement preprocessing pipeline
+Per dataset:
+- quantile transform numerical features, except Otto
+- one-hot encode categorical features for non-CatBoost algorithms
+- standardize regression targets
+
+## Step 3: Implement embedding modules
+Create a clean abstraction:
+- `NumericalEmbeddingBase`
+- `LinearEmbedding`
+- `PiecewiseLinearEncoding`
+- `PeriodicEmbedding`
+- `AutoDisEmbedding`
+- `DICEEmbedding` if included
+
+Each should:
+- operate feature-wise
+- support per-feature independent parameters
+- provide output shape compatible with MLP / Transformer backbones
+
+## Step 4: Implement backbones
+- MLP
+- ResNet
+- FT-Transformer / Transformer-L
+
+Ensure model wrappers accept:
+- raw numerical inputs
+- embedded numerical inputs
+- categorical inputs if needed
+
+## Step 5: Build model variants
+Compose backbone + embedding according to the naming scheme.
+
+## Step 6: Implement tuning engine
+Use Optuna TPE:
+- define search spaces exactly as paper
+- tune on validation
+- save best hyperparameters per model-dataset pair
+
+## Step 7: Implement training loop
+Features:
+- AdamW
+- no LR schedule
+- early stopping with patience 16
+- consistent seed control
+- checkpoint best validation model
+
+## Step 8: Evaluation and ensembling
+- Run 15 seeds for each best config
+- Evaluate mean/std on test
+- Build 3 ensembles of 5 models for ensemble comparisons
+
+## Step 9: Produce tables
+- Match the paper’s tables:
+  - model comparison
+  - dataset results
+  - parameter counts
+  - preprocessing sensitivity
+  - alternative encodings
+
+---
+
+# 11) Important ambiguities / things to verify
+
+Several details are not fully specified in the parsed text and should be verified from supplementary material or code if possible:
+
+1. **Exact formula for Periodic embedding**
+   - The parse indicates trainable coefficients and tunable \(\sigma\) and \(k\), but not the full equation.
+
+2. **Exact preprocessing for each dataset**
+   - Especially how categorical features were handled in each benchmark
+   - Exact split script from Gorishniy et al. may be needed for faithful replication
+
+3. **Exact search space for \(\sigma\)**
+   - The paper says \(\sigma\) is tuned, but the visible appendix excerpt does not show the distribution
+
+4. **Meaning of `# iterations = 100`**
+   - Likely max training epochs in hyperparameter tuning; confirm with implementation details from the original benchmark protocol
+
+5. **Exact backbone implementation details**
+   - Especially FT-Transformer / ResNet differences relative to the Gorishniy et al. codebase
+
+---
+
+# 12) Practical reproduction priority order
+
+If you want the fastest faithful reproduction, do it in this order:
+
+1. **Data preprocessing + splits**
+2. **Baseline MLP / ResNet / Transformer-L**
+3. **Linear embedding baseline**
+4. **PLE-q and PLE-t**
+5. **Periodic embedding**
+6. **Optuna tuning**
+7. **15-seed evaluation**
+8. **Ensembles and rank tables**
+9. **Optional: AutoDis, DICE, thermometer, one-blob**
+
+This order gives you a working pipeline early, then lets you add modules incrementally.
+
+---
+
+# 13) Minimal reproducibility checklist
+
+Before coding, make sure your plan covers:
+
+- [ ] All 11 datasets loaded
+- [ ] Train/val/test splits fixed and reproducible
+- [ ] Quantile preprocessing for all but Otto
+- [ ] One-hot encoding for categorical features in non-CatBoost models
+- [ ] AdamW + early stopping + no LR schedule
+- [ ] 15 seeds per tuned config
+- [ ] Optuna TPE tuning
+- [ ] PLE quantile and target-aware binning
+- [ ] Periodic embedding with trainable coefficients
+- [ ] Backbone-specific composition rules
+- [ ] Accuracy / RMSE metrics
+- [ ] Ensemble averaging protocol
+
+---
+
+If you want, I can next turn this into a **code architecture plan**: file structure, class design, and module-by-module implementation blueprint for the Python reproduction.
