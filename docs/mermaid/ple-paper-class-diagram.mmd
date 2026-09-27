@@ -1,0 +1,49 @@
+classDiagram
+    class MainApp {
+        +__init__(config: dict) 
+        +run_experiment() -> None
+    }
+    class Config {
+        +load_config() -> dict
+    }
+    class DatasetLoader {
+        +__init__(config: dict)
+        +load_data() -> DataBundle
+    }
+    class DataBundle {
+        +train: Any
+        +val: Any
+        +test: Any
+    }
+    class EmbeddingModule {
+        <<abstract>>
+        +forward(x: Tensor) -> Tensor
+    }
+    class PLEEmbedding {
+        +__init__(bins: int, method: str)  
+        +forward(x: Tensor) -> Tensor
+    }
+    class PeriodicEmbedding {
+        +__init__(k: int, sigma: float)
+        +forward(x: Tensor) -> Tensor
+    }
+    class BackboneModel {
+        +__init__(embeddings: List[EmbeddingModule], params: dict)
+        +forward(x: Tensor) -> Tensor
+    }
+    class Trainer {
+        +__init__(model: BackboneModel, data: DataBundle, config: dict)
+        +train() -> None
+        +save_model() -> None
+    }
+    class Evaluator {
+        +__init__(model: BackboneModel, data: DataBundle)
+        +evaluate() -> dict
+    }
+    MainApp --> DatasetLoader
+    MainApp --> Trainer
+    MainApp --> Evaluator
+    Trainer --> BackboneModel
+    BackboneModel --> EmbeddingModule
+    PLEEmbedding --|> EmbeddingModule
+    PeriodicEmbedding --|> EmbeddingModule

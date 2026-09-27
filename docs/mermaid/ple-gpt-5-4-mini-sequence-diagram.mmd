@@ -1,0 +1,84 @@
+sequenceDiagram
+    participant U as User
+    participant M as main.py
+    participant I as IOUtils
+    participant R as ReproducibilityUtils
+    participant DL as DatasetLoader
+    participant P as Preprocessor
+    participant T as Tuner
+    participant MF as ModelFactory
+    participant TR as Trainer
+    participant E as MetricsEvaluator
+    participant EN as EnsembleEvaluator
+    participant G as GBDDBaselineRunner
+
+    U->>M: run_experiment(config_path)
+    M->>I: load_config(config_path)
+    I-->>M: ExperimentConfig
+    M->>R: set_seed(config.seed)
+    R-->>M: deterministic environment ready
+    M->>DL: __init__(config)
+    M->>DL: load_and_split()
+    DL->>DL: load_raw()
+    DL->>DL: split_data(raw_df)
+    DL-->>M: DatasetSplits
+    M->>P: __init__(config)
+    M->>P: fit_transform(splits)
+    P->>P: fit(splits)
+    P->>P: transform(splits)
+    P-->>M: PreprocessedData
+
+    alt hyperparameter tuning enabled
+        M->>T: __init__(config)
+        M->>T: run(data)
+        loop for each Optuna trial
+            T->>T: sample_hyperparameters(trial)
+            T->>MF: create(config_with_trial_params, data)
+            MF-->>T: TabularModel
+            T->>TR: __init__(model, config_with_trial_params)
+            T->>TR: train(data)
+            TR->>TR: fit_one_epoch()
+            TR->>TR: validate()
+            TR-->>T: best validation score
+        end
+        T-->>M: best hyperparameters
+    end
+
+    M->>MF: create(best_config, data)
+    MF-->>M: TabularModel
+    M->>TR: __init__(model, best_config)
+    M->>TR: train(data)
+    loop epochs until early stopping
+        TR->>TR: fit_one_epoch()
+        TR->>TR: validate()
+        TR->>TR: save_checkpoint(best_model)
+    end
+    TR-->>M: trained model + best checkpoint
+
+    M->>E: compute_classification()/compute_regression()
+    E-->>M: test metrics
+
+    opt repeated 15 seeds
+        M->>R: set_seed(next_seed)
+        M->>TR: train(data)
+        TR-->>M: run complete
+        M->>E: evaluate on test
+        E-->>M: per-seed metrics
+    end
+
+    opt ensemble evaluation
+        M->>EN: __init__(num_groups=3)
+        M->>EN: build_ensembles(predictions)
+        EN-->>M: 3 ensembles
+        M->>EN: evaluate_ensembles(y_true, ensembles)
+        EN-->>M: ensemble metrics
+    end
+
+    opt GBDT baselines
+        M->>G: run_catboost(data, config)
+        G-->>M: CatBoost metrics
+        M->>G: run_xgboost(data, config)
+        G-->>M: XGBoost metrics
+    end
+
+    M-->>U: save tables, metrics, checkpoints

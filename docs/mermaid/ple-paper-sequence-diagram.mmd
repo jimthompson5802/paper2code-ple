@@ -1,0 +1,30 @@
+sequenceDiagram
+    participant M as MainApp
+    participant C as Config
+    participant DL as DatasetLoader
+    participant DB as DataBundle
+    participant BM as BackboneModel
+    participant EM as EmbeddingModule
+    participant TR as Trainer
+    participant EV as Evaluator
+
+    M->>C: load_config()
+    C-->>M: return config dict
+    M->>DL: new DatasetLoader(config)
+    DL->>DL: load and preprocess data
+    DL-->>M: return DataBundle {train, val, test}
+    M->>BM: initialize BackboneModel(embeddings, model_params)
+    BM->>EM: initialize each embedding module (PLEEmbedding / PeriodicEmbedding)
+    M->>TR: new Trainer(BM, DataBundle, config)
+    TR->>BM: call model.forward(x) during training loop
+    BM-->>TR: return predictions
+    TR->>TR: compute loss (MSE or CrossEntropy) using predictions & targets
+    TR->>TR: update model with AdamW optimizer
+    TR->>TR: implement early stopping (patience=16 epochs)
+    TR-->>M: training complete
+    M->>EV: new Evaluator(BM, DataBundle)
+    EV->>BM: call model.forward(x) on validation/test splits
+    BM-->>EV: return predictions
+    EV->>M: return evaluation metrics (accuracy, RMSE, parameter count)
+    M->>M: optionally ensemble predictions from multiple runs
+    M-->>Console: print final results and logs

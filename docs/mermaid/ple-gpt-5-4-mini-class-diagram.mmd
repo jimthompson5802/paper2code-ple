@@ -1,0 +1,179 @@
+classDiagram
+    class ExperimentConfig {
+        +str dataset_name
+        +str model_name
+        +str task_type
+        +int seed
+        +int num_trials
+        +int patience
+        +str device
+        +dict dataset_params
+        +dict model_params
+        +dict train_params
+        +dict tuning_space
+    }
+
+    class DatasetSplits {
+        +pd.DataFrame train_df
+        +pd.DataFrame val_df
+        +pd.DataFrame test_df
+        +np.ndarray y_train
+        +np.ndarray y_val
+        +np.ndarray y_test
+        +list numerical_cols
+        +list categorical_cols
+    }
+
+    class PreprocessedData {
+        +torch.Tensor x_train_num
+        +torch.Tensor x_val_num
+        +torch.Tensor x_test_num
+        +torch.Tensor x_train_cat
+        +torch.Tensor x_val_cat
+        +torch.Tensor x_test_cat
+        +torch.Tensor y_train
+        +torch.Tensor y_val
+        +torch.Tensor y_test
+        +int num_features
+        +int cat_features
+        +dict feature_metadata
+    }
+
+    class DatasetLoader {
+        +__init__(config: ExperimentConfig)
+        +load_raw() pd.DataFrame
+        +split_data(df: pd.DataFrame) DatasetSplits
+        +load_and_split() DatasetSplits
+    }
+
+    class Preprocessor {
+        +__init__(config: ExperimentConfig)
+        +fit(splits: DatasetSplits) None
+        +transform(splits: DatasetSplits) PreprocessedData
+        +fit_transform(splits: DatasetSplits) PreprocessedData
+        +build_quantile_transformer() Any
+        +build_ohe_encoder() Any
+        +standardize_targets() None
+    }
+
+    class BaseEmbedding {
+        <<abstract>>
+        +output_dim: int
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class LinearEmbedding {
+        +__init__(num_features: int, emb_dim: int)
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class PiecewiseLinearEmbedding {
+        +__init__(bin_edges: list, emb_dim: int, mode: str)
+        +build_bins(x_train: np.ndarray) None
+        +encode_feature(x: torch.Tensor, feature_idx: int) torch.Tensor
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class PeriodicEmbedding {
+        +__init__(num_features: int, emb_dim: int, sigma: float, k: int)
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class EmbeddingFactory {
+        +create(model_name: str, config: ExperimentConfig) BaseEmbedding
+    }
+
+    class MLPBackbone {
+        +__init__(input_dim: int, hidden_dim: int, num_layers: int, dropout: float)
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class ResNetBackbone {
+        +__init__(input_dim: int, hidden_dim: int, num_layers: int, hidden_factor: float, dropout: float)
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class TransformerBackbone {
+        +__init__(num_tokens: int, emb_dim: int, n_layers: int, n_heads: int, ffn_factor: float, dropout: float)
+        +forward(x: torch.Tensor) torch.Tensor
+    }
+
+    class TabularModel {
+        +__init__(embedding: BaseEmbedding, backbone: object, head: torch.nn.Module)
+        +forward(x_num: torch.Tensor, x_cat: torch.Tensor = None) torch.Tensor
+        +predict(x_num: torch.Tensor, x_cat: torch.Tensor = None) torch.Tensor
+    }
+
+    class ModelFactory {
+        +create(config: ExperimentConfig, data: PreprocessedData) TabularModel
+    }
+
+    class Trainer {
+        +__init__(model: TabularModel, config: ExperimentConfig)
+        +train(data: PreprocessedData) dict
+        +fit_one_epoch() float
+        +validate() float
+        +save_checkpoint(path: str) None
+        +load_best_checkpoint(path: str) None
+    }
+
+    class Tuner {
+        +__init__(config: ExperimentConfig)
+        +objective(trial: optuna.Trial) float
+        +run(data: PreprocessedData) dict
+        +sample_hyperparameters(trial: optuna.Trial) dict
+    }
+
+    class MetricsEvaluator {
+        +compute_classification(y_true: np.ndarray, y_pred: np.ndarray) dict
+        +compute_regression(y_true: np.ndarray, y_pred: np.ndarray) dict
+        +select_metric(task_type: str) str
+    }
+
+    class EnsembleEvaluator {
+        +__init__(num_groups: int)
+        +build_ensembles(predictions: list) list
+        +evaluate_ensembles(y_true: np.ndarray, ensembles: list) dict
+    }
+
+    class GBDDBaselineRunner {
+        +run_catboost(data: PreprocessedData, config: ExperimentConfig) dict
+        +run_xgboost(data: PreprocessedData, config: ExperimentConfig) dict
+    }
+
+    class ReproducibilityUtils {
+        +set_seed(seed: int) None
+        +set_deterministic() None
+        +get_device(device: str) torch.device
+    }
+
+    class IOUtils {
+        +load_config(path: str) ExperimentConfig
+        +save_json(obj: dict, path: str) None
+        +save_pickle(obj: object, path: str) None
+        +load_pickle(path: str) object
+    }
+
+    ExperimentConfig --> DatasetLoader
+    ExperimentConfig --> Preprocessor
+    ExperimentConfig --> Tuner
+    ExperimentConfig --> ModelFactory
+    DatasetLoader --> DatasetSplits
+    Preprocessor --> DatasetSplits
+    Preprocessor --> PreprocessedData
+    EmbeddingFactory --> BaseEmbedding
+    LinearEmbedding --|> BaseEmbedding
+    PiecewiseLinearEmbedding --|> BaseEmbedding
+    PeriodicEmbedding --|> BaseEmbedding
+    ModelFactory --> TabularModel
+    TabularModel --> BaseEmbedding
+    TabularModel --> MLPBackbone
+    TabularModel --> ResNetBackbone
+    TabularModel --> TransformerBackbone
+    Trainer --> TabularModel
+    Tuner --> Trainer
+    Tuner --> MetricsEvaluator
+    EnsembleEvaluator --> MetricsEvaluator
+    GBDDBaselineRunner --> PreprocessedData
+    IOUtils --> ExperimentConfig
+    ReproducibilityUtils --> Trainer
