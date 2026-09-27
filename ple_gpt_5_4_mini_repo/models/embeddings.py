@@ -334,6 +334,43 @@ class PiecewiseLinearEmbedding(BaseEmbedding):
         self._is_fitted = True
         return self
 
+    def set_boundaries(self, boundaries: ArrayLike) -> "PiecewiseLinearEmbedding":
+        """Configures explicit PLE boundaries for a single numerical feature.
+
+        Args:
+          boundaries: One-dimensional, strictly increasing bin edges. The
+            number of intervals must match ``num_bins``.
+
+        Returns:
+          Self, configured to encode with the supplied boundaries.
+        """
+        if self.num_features != 1:
+            raise ValueError("Explicit boundaries can only be set for one feature.")
+
+        if isinstance(boundaries, torch.Tensor):
+            boundaries = boundaries.detach().cpu().numpy()
+        edges = np.asarray(boundaries, dtype=np.float64)
+        if edges.ndim != 1:
+            raise ValueError(f"Expected 1D boundaries, got shape {edges.shape}.")
+        if edges.size != self.num_bins + 1:
+            raise ValueError(
+                f"Expected {self.num_bins + 1} boundaries for {self.num_bins} bins, "
+                f"got {edges.size}."
+            )
+        if not np.all(np.isfinite(edges)) or np.any(np.diff(edges) <= 0):
+            raise ValueError("Boundaries must be finite and strictly increasing.")
+
+        self._bin_edges = [edges.copy()]
+        self._feature_dims = [self.num_bins]
+        if self.output_dim > 0:
+            self.post_projection = _FeatureWiseMLP(
+                in_dim=self.num_bins,
+                out_dim=self.output_dim,
+                num_features=self.num_features,
+            )
+        self._is_fitted = True
+        return self
+
     def forward(self, x: Tensor) -> Tensor:
         """Encodes features using per-feature piecewise linear representations."""
         x = self._validate_input(x)
