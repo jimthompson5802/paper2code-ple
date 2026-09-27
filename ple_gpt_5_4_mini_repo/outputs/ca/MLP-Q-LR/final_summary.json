@@ -1,0 +1,15 @@
+{
+  "aggregated_metrics": {
+    "rmse": 0.44396585751013506,
+    "rmse_best": 0.44396585751013506,
+    "rmse_std": 0.0
+  },
+  "baseline_results": {},
+  "dataset_name": "ca",
+  "ensemble_metrics": null,
+  "model_name": "MLP-Q-LR",
+  "seed_list": [
+    42
+  ],
+  "task_type": "regression"
+}

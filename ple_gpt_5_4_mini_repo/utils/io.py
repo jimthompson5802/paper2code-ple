@@ -175,23 +175,15 @@ def _validate_config(config: Mapping[str, Any]) -> None:
     for key_path in _REQUIRED_KEY_PATHS:
         _get_nested_value(config, key_path)
 
-    # Consistency checks grounded in the provided config.yaml.
+    # Validate run counts while allowing smaller non-paper demonstration runs.
     num_seeds = int(_get_nested_value(config, ("experiment", "num_seeds")))
     num_ensembles = int(_get_nested_value(config, ("experiment", "num_ensembles")))
     ensemble_group_size = int(
         _get_nested_value(config, ("experiment", "ensemble_group_size"))
     )
-    if num_seeds != 15:
+    if num_seeds < 1 or num_ensembles < 1 or ensemble_group_size < 1:
         raise ValueError(
-            f"Expected experiment.num_seeds to be 15 for the paper protocol, got {num_seeds}."
-        )
-    if num_ensembles != 3:
-        raise ValueError(
-            f"Expected experiment.num_ensembles to be 3, got {num_ensembles}."
-        )
-    if ensemble_group_size != 5:
-        raise ValueError(
-            f"Expected experiment.ensemble_group_size to be 5, got {ensemble_group_size}."
+            "Experiment seed, ensemble, and ensemble-group counts must all be positive."
         )
     if num_seeds != num_ensembles * ensemble_group_size:
         raise ValueError(

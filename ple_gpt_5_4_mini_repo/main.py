@@ -30,7 +30,6 @@ from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Sequence,
 import numpy as np
 import torch
 
-from baselines.gbdt import GBDDBaselineRunner
 from data.dataset_loader import DatasetLoader
 from data.preprocessing import PreprocessedData, Preprocessor
 from evaluation.ensemble import EnsembleEvaluator
@@ -38,7 +37,7 @@ from evaluation.metrics import MetricsEvaluator
 from models.tabular_model import ModelFactory, TabularModel
 from training.trainer import Trainer
 from training.tuning import Tuner
-from utils.io import load_config, save_json, save_pickle
+from utils.io import load_config, save_json
 from utils.reproducibility import get_device, set_deterministic, set_seed
 
 
@@ -302,9 +301,7 @@ def _save_deep_artifacts(
         "tuning_summary": tuning_summary,
     }
     save_json(summary, output_dir / "deep_summary.json")
-    save_pickle(artifacts.per_seed_predictions, output_dir / "test_predictions.pkl")
-    save_pickle(artifacts.per_seed_targets, output_dir / "test_targets.pkl")
-    save_pickle(artifacts.best_config, output_dir / "best_config.pkl")
+    save_json(artifacts.best_config, output_dir / "best_config.json")
 
 
 def _run_baselines(
@@ -313,6 +310,8 @@ def _run_baselines(
     output_dir: Path,
 ) -> Dict[str, Any]:
     """Runs CatBoost and XGBoost baselines."""
+    from baselines.gbdt import GBDDBaselineRunner
+
     runner = GBDDBaselineRunner(config)
     results: Dict[str, Any] = {}
 

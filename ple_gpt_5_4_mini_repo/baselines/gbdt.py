@@ -395,7 +395,10 @@ class GBDDBaselineRunner:
         """Computes the canonical validation/test metric."""
         if self._is_classification():
             return float(accuracy_score(np.asarray(y_true).reshape(-1), np.asarray(y_pred).reshape(-1)))
-        return float(mean_squared_error(np.asarray(y_true).reshape(-1), np.asarray(y_pred).reshape(-1), squared=False))
+        mse = mean_squared_error(
+            np.asarray(y_true).reshape(-1), np.asarray(y_pred).reshape(-1)
+        )
+        return float(np.sqrt(mse))
 
     def _catboost_loss_name(self) -> str:
         """Returns the CatBoost loss function name."""

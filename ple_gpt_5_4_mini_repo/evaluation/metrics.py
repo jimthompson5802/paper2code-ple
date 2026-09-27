@@ -103,7 +103,7 @@ class MetricsEvaluator:
           ValueError: If the inputs are empty or have incompatible shapes.
         """
         y_true_arr, y_pred_arr = self._prepare_regression_arrays(y_true, y_pred)
-        rmse = float(mean_squared_error(y_true_arr, y_pred_arr, squared=False))
+        rmse = float(np.sqrt(mean_squared_error(y_true_arr, y_pred_arr)))
         return {"rmse": rmse}
 
     def select_metric(self, task_type: str) -> str:

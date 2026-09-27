@@ -1,0 +1,131 @@
+dataset_name: ca
+model_name: MLP-Q-LR
+task_type: regression
+
+dataset_params:
+  path: ../data/ca-housing.csv
+
+experiment:
+  seed: 42
+  num_seeds: 1
+  num_ensembles: 1
+  ensemble_group_size: 1
+
+data:
+  preprocessing:
+    numerical:
+      default: quantile_transform
+      otto_group_product_classification: none
+    categorical:
+      default: one_hot
+  target:
+    regression_standardization: true
+
+training:
+  optimizer: adamw
+  loss:
+    classification: cross_entropy
+    regression: mse
+  learning_rate:
+    mlp: [0.001, 0.001]
+    resnet: [0.001, 0.001]
+    transformer:
+      sa_co_mi: [0.0001, 0.0001]
+      other: [0.0001, 0.0001]
+  batch_size:
+    ge: 128
+    ch: 128
+    ca: 256
+    ho: 256
+    ad: 256
+    ot: 512
+    hi: 512
+    fb: 512
+    sa: 1024
+    co: 1024
+    mi: 1024
+  early_stopping:
+    patience: 5
+    min_delta: 0.0
+  lr_schedule: none
+  max_epochs: 30
+
+hyperparameter_tuning:
+  method: optuna_tpe
+  trials: 1
+  search_spaces:
+    linear_embedding_output_dim: [16, 16]
+    ple_quantiles: [16, 16]
+    ple_tree:
+      max_leaves: [16, 16]
+      min_items_per_leaf: [1, 1]
+      min_information_gain: [0.000000001, 0.000000001]
+    periodic_k: [16, 16]
+
+models:
+  mlp:
+    layers: [2, 2]
+    layer_size: [64, 64]
+    dropout: [0.0, 0.0]
+    weight_decay: [0.0001, 0.0001]
+  resnet:
+    layers: [2, 2]
+    layer_size: [64, 64]
+    hidden_factor: [2.0, 2.0]
+    hidden_dropout: [0.0, 0.0]
+    residual_dropout: [0.0, 0.0]
+    weight_decay: [0.0001, 0.0001]
+  transformer:
+    layers:
+      sa_co_mi: [2, 2]
+      other: [2, 2]
+    embedding_size:
+      sa_co_mi: [64, 64]
+      other: [64, 64]
+    residual_dropout:
+      sa_co_mi: 0.0
+      other: [0.0, 0.0]
+    attention_dropout: [0.0, 0.0]
+    ffn_dropout: [0.0, 0.0]
+    ffn_factor: [1.0, 1.0]
+    weight_decay:
+      sa_co_mi: 0.0001
+      other: [0.0001, 0.0001]
+
+evaluation:
+  metrics:
+    classification: accuracy
+    regression: rmse
+  validation_selection: best_validation_score
+  test_runs_per_tuned_config: 1
+
+baselines:
+  catboost:
+    fixed:
+      early_stopping_rounds: 50
+      od_pval: 0.001
+      iterations: 2000
+    tuning:
+      max_depth: [1, 10]
+      learning_rate: [0.001, 1.0]
+      bagging_temperature: [0.0, 1.0]
+      l2_leaf_reg: [1.0, 10.0]
+      leaf_estimation_iterations: [1, 10]
+  xgboost:
+    fixed:
+      booster: gbtree
+      early_stopping_rounds: 50
+      n_estimators: 2000
+    tuning:
+      max_depth: [3, 10]
+      min_child_weight: [0.0001, 100.0]
+      subsample: [0.5, 1.0]
+      learning_rate: [0.001, 1.0]
+      colsample_bytree: [0.5, 1.0]
+      gamma: [0.0, 100.0]
+      lambda: [0.0, 10.0]
+
+# Runtime model parameters consumed directly when --no-tuning is used.
+model:
+  learning_rate: 0.001
+  weight_decay: 0.0001
